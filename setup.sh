@@ -120,10 +120,10 @@ print_group FAIL "❌ 잘 안 된 것" 31 || FAIL_COUNT=$?
 print_group SKIP "⚠️  건너뛴 것"  33 || SKIP_COUNT=$?
 OK_COUNT=${OK_COUNT:-0}; FAIL_COUNT=${FAIL_COUNT:-0}; SKIP_COUNT=${SKIP_COUNT:-0}
 
-printf '\n--------------------------------------------------------\n'
+printf '\n'; printf '%s\n' '--------------------------------------------------------'
 printf '  성공 %d / 실패 %d / 생략 %d\n' "$OK_COUNT" "$FAIL_COUNT" "$SKIP_COUNT"
 printf '  로그 : %s\n' "$LOG_FILE"
-printf '--------------------------------------------------------\n'
+printf '%s\n' '--------------------------------------------------------'
 printf '\n  다음 단계:\n'
 printf '    ./inspect.sh        # 하드웨어 점검 + 서버 설정\n'
 printf '    ./run-burnin.sh     # 1시간 번인 (결과는 실행한 디렉터리에 생성)\n\n'
