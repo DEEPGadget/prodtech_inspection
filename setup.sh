@@ -6,13 +6,13 @@
 #     자동 업데이트 차단 / 전원관리 / Time Zone /
 #     NVIDIA Persistence Mode / OS ACS Disable / GRUB 점검·안내
 #   PART B. 도구 설치
-#     apt 패키지 + gadget-burn (번인에 필요한 최소 구성)
-#     --full 이면 nccl-tests / gpu-burn / fio / deepgadget-log-grabber 까지
+#     apt 패키지 + gadget-burn + deepgadget-log-grabber
+#     --full 이면 nccl-tests / gpu-burn / fio 까지
 #
 # 설정을 바꾸는 것은 이 스크립트뿐이다. inspect.sh 는 확인만 한다.
 #
 # 사용법:
-#   ./setup.sh                    # 설정 + 번인 최소 도구
+#   ./setup.sh                    # 설정 + 검수/번인 기본 도구
 #   ./setup.sh --full             # + 벤치마크/진단 도구 전부
 #   ./setup.sh --full /opt/bench  # 외부 저장소를 다른 경로에 설치
 #
@@ -77,7 +77,7 @@ printf '\033[1;36m'
 hr; printf '  DEEPGadget SW 검수 · 설정 + 도구 설치  —  %s\n' "$(hostname)"; hr
 printf '\033[0m'
 printf '   설치 경로 : %s\n' "$BASE_DIR"
-printf '   모드      : %s\n' "$([ "$FULL" -eq 1 ] && echo '--full (벤치마크 도구 포함)' || echo '기본 (번인 최소 구성)')"
+printf '   모드      : %s\n' "$([ "$FULL" -eq 1 ] && echo '--full (벤치마크 도구 포함)' || echo '기본 (검수/번인 도구)')"
 printf '   결과경로  : %s\n' "$OUTDIR"
 
 log "sudo 권한 확인"
@@ -318,15 +318,19 @@ else
     record FAIL "gadget-burn" "make 실패 — 위 로그의 make 구간 확인"
 fi
 
+# ---------------------------------------------------------------- deepgadget-log-grabber (필수)
+# 장애 로그 수집은 출고 후에도 쓰이므로 기본 설치에 포함한다. 빌드가 없어 로그도 짧다.
+log "deepgadget-log-grabber: clone/pull (빌드 없음)"
+if clone_repo https://github.com/DEEPGadget/deepgadget-log-grabber.git deepgadget-log-grabber; then
+    ok "deepgadget-log-grabber 준비 완료: $BASE_DIR/deepgadget-log-grabber"
+    record OK "deepgadget-log-grabber" "clone 완료 (빌드 없음)"
+else
+    err "deepgadget-log-grabber clone 실패"
+    record FAIL "deepgadget-log-grabber" "clone 실패 — 네트워크/접근권한 확인"
+fi
+
 # ---------------------------------------------------------------- --full 추가 도구
 if [[ "$FULL" -eq 1 ]]; then
-    log "deepgadget-log-grabber (clone only)"
-    if clone_repo https://github.com/DEEPGadget/deepgadget-log-grabber.git deepgadget-log-grabber; then
-        record OK "deepgadget-log-grabber" "clone 완료 (빌드 없음)"
-    else
-        record FAIL "deepgadget-log-grabber" "clone 실패"
-    fi
-
     log "nccl-tests: clone + make"
     if clone_repo https://github.com/NVIDIA/nccl-tests.git nccl-tests; then
         NCCL_HEADER=""
@@ -378,7 +382,7 @@ if [[ "$FULL" -eq 1 ]]; then
         record FAIL "fio" "clone 실패"
     fi
 else
-    record SKIP "벤치마크 도구" "nccl-tests / gpu-burn / fio / log-grabber — 필요하면 ./setup.sh --full"
+    record SKIP "벤치마크 도구" "nccl-tests / gpu-burn / fio — 필요하면 ./setup.sh --full"
 fi
 
 # ================================================================

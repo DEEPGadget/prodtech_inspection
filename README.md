@@ -48,8 +48,8 @@ cd prodtech_inspection
 **설정을 바꾸는 것은 이 스크립트뿐이다.**
 
 ```bash
-./setup.sh                    # 설정 + 번인 최소 도구
-./setup.sh --full             # + 벤치마크/진단 도구 전부
+./setup.sh                    # 설정 + 검수/번인 기본 도구
+./setup.sh --full             # + 벤치마크 도구 (nccl-tests / gpu-burn / fio)
 ./setup.sh --full /opt/bench  # 외부 저장소를 다른 경로에 설치
 ```
 
@@ -73,7 +73,7 @@ cd prodtech_inspection
 |---|---|---|
 | apt 패키지 | ✓ `stress` `lm-sensors` `nvme-cli` `ipmitool` `pciutils` `usbutils` `dmidecode` `ifupdown-extra` `infiniband-diags` `build-essential` `git` | ✓ |
 | gadget-burn | ✓ clone + make (번인 필수, CUDA 필요) | ✓ |
-| deepgadget-log-grabber | — | ✓ clone |
+| deepgadget-log-grabber | ✓ clone (장애 로그 수집, 빌드 없음) | ✓ |
 | nccl-tests | — | ✓ clone + make (NCCL 필요) |
 | gpu-burn | — | ✓ clone + make |
 | fio | — | ✓ clone + build + install |
