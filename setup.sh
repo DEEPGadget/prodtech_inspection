@@ -44,6 +44,9 @@ OUTDIR="$PWD/setup_$(hostname)_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTDIR" || { echo "결과 디렉터리를 만들 수 없습니다: $OUTDIR" >&2; exit 1; }
 LOG_FILE="$OUTDIR/setup.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
+TEE_PID=$!
+# 스크립트가 먼저 끝나면 tee 가 마지막 출력을 흘려 요약이 잘린다. 종료 시 flush.
+trap 'exec 1>&- 2>&-; wait "$TEE_PID" 2>/dev/null || true' EXIT
 
 # CUDA: 인스톨러가 ~/.bashrc 끝에 넣는 PATH 는 비대화형 셸에서 로드되지 않으므로 직접 넣는다.
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
@@ -96,7 +99,10 @@ printf '\n\033[1;35m'; hr; printf ' PART A.  서버 설정\n'; hr; printf '\033[
 log "자동 업데이트 차단 (apt 잠금 방지 — 패키지 설치보다 먼저)"
 AUTOUPD_UNITS=(apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service)
 for u in "${AUTOUPD_UNITS[@]}"; do
-    if ! systemctl list-unit-files 2>/dev/null | grep -q "^${u//./\\.}[[:space:]]"; then
+    # 주의: pipefail 아래에서 `... | grep -q` 는 grep 이 파이프를 일찍 닫아
+    #       앞 명령이 SIGPIPE(141)로 죽으면 매칭 성공인데도 실패로 뒤집힌다.
+    #       systemctl 의 패턴 인자를 써서 파이프 자체를 없앤다.
+    if [[ -z "$(systemctl list-unit-files "$u" --no-legend 2>/dev/null)" ]]; then
         record SKIP "자동업데이트: $u" "해당 unit 없음"
         continue
     fi
@@ -293,8 +299,10 @@ else
 fi
 
 if have sensors; then
-    if sensors 2>/dev/null | grep -qE 'Tctl|Package id'; then
-        record OK "lm-sensors" "$(sensors 2>/dev/null | grep -cE 'Tctl|Package id')개 CPU 온도 센서 인식"
+    # grep -q 를 파이프 끝에 두면 pipefail 이 SIGPIPE 를 실패로 오인할 수 있다 → 먼저 담는다
+    sensor_hits=$(sensors 2>/dev/null | grep -cE 'Tctl|Package id')
+    if [[ "${sensor_hits:-0}" -gt 0 ]]; then
+        record OK "lm-sensors" "${sensor_hits}개 CPU 온도 센서 인식"
     else
         warn "sensors 에서 CPU 온도(Tctl/Package id)를 찾지 못했습니다 → sudo sensors-detect --auto"
         record FAIL "lm-sensors" "Tctl/Package id 없음 — sudo sensors-detect --auto 필요"

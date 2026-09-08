@@ -7,23 +7,25 @@ Manycoresoft / DEEPGadget **SW 검수** 스크립트 모음.
 
 ```
 prodtech_inspection/
-├── setup.sh          # 서버 설정 + 도구 설치     ← 값을 바꾸는 건 여기뿐
-├── inspect.sh        # 검수 (읽기 전용)          ← 확인만, 아무것도 안 바꿈
-├── run-burnin.sh     # GPU/CPU 동시 번인 + 온도 로깅 → CSV
+├── setup.sh              # 서버 설정 + 도구 설치     ← 값을 바꾸는 건 여기뿐
+├── inspect.sh            # 검수 (읽기 전용)          ← 확인만, 아무것도 안 바꿈
+├── functest.sh           # 기능 테스트 (HW 정보 + GPU/CPU 5분 번인)
+├── run-burnin.sh         # 1시간 번인 + 온도 CSV
 └── lib/
-    ├── gpu-cpu.sh    # 온도 로깅
-    └── make-csv.sh   # 온도 로그 → CSV
+    └── sample-sensors.sh # GPU/CPU/NVMe 온도를 CSV 로 직접 기록
 ```
 
 구 `Check_server_information` 과 `setup_tools.sh` 를 대체한다. 이 저장소 하나면 된다.
 
 **역할 분담**
 
-| | setup.sh | inspect.sh |
-|---|---|---|
-| 서버 설정 | **적용한다** | 걸려 있는지 **확인만** |
-| 도구 설치·빌드 | 한다 | 안 한다 |
-| 실행 횟수 | 장비당 1회 (설정 바뀔 때 재실행) | 몇 번이든 |
+| | setup.sh | inspect.sh | functest.sh | run-burnin.sh |
+|---|---|---|---|---|
+| 서버 설정 | **적용** | 확인만 | 안 함 | 안 함 |
+| 도구 설치·빌드 | 함 | 안 함 | 안 함 | 안 함 |
+| HW 점검 | — | ✓ | ✓ (HW 부분만) | — |
+| 번인 | — | — | GPU+CPU 5분 | GPU+CPU 1시간 |
+| 메모리 부하 | — | — | `--mem` | — |
 
 `inspect.sh` 에서 ❌ 가 나오면 대부분 `./setup.sh` 를 (다시) 돌리면 된다.
 
@@ -34,6 +36,7 @@ git clone https://github.com/DEEPGadget/prodtech_inspection.git
 cd prodtech_inspection
 
 ./setup.sh          # 1회. 서버 설정 + 도구 설치 (make 로그가 길다)
+./functest.sh       # 기능 테스트 — HW 정보 + GPU/CPU 5분 번인
 ./inspect.sh        # 검수 — 읽기 전용
 ./run-burnin.sh     # 1시간 번인 → CSV
 ```
@@ -79,6 +82,35 @@ cd prodtech_inspection
 | fio | — | ✓ clone + build + install |
 
 결과: `setup_<host>_<시각>/setup.log` — make 출력이 길어도 맨 끝 요약에 항목별 성공/실패가 모인다.
+
+---
+
+## functest.sh
+
+출하 전 **기능 확인**용. 검수(`inspect.sh`)보다 가볍게, HW 가 다 보이는지와
+GPU/CPU 가 부하를 받는지만 짧게 본다.
+
+```bash
+./functest.sh              # HW 정보 + GPU/CPU 5분 번인
+./functest.sh --mem        # + 메모리 부하 (전체 RAM 의 80%)
+./functest.sh --mem 30%    # 부하량 지정 (% 또는 4G / 512M)
+./functest.sh --time 600   # 번인 시간(초)
+./functest.sh --no-hw      # 번인만
+```
+
+1. **HW 정보** — `inspect.sh --hw-only` 를 그대로 쓴다(PART 1만, 서버 설정은 안 봄)
+2. **GPU + CPU 번인** — `run-burnin.sh` 를 5분으로 호출
+3. **메모리 부하**(옵션) — `stress --vm` 을 번인과 겹쳐서 건다
+
+```
+functest_<host>_<시각>/
+├── hw/                    inspect.log / serials.csv / raw/
+├── burnin_<host>_<시각>/  온도 CSV, gadget_burn 로그 등
+└── stress-mem.log         --mem 을 준 경우
+```
+
+서버 설정은 건드리지 않는다. 설정은 `setup.sh`, 설정 확인까지 포함한 검수는
+`inspect.sh` 다.
 
 ---
 
@@ -138,6 +170,10 @@ NVIDIA GPU 는 유휴일 때 링크를 Gen1 으로 내린다. 그 상태로 읽�
 
 USB 이더넷(BMC 가상 NIC, gadget 등)은 장착 부품이 아니므로 S/N 목록에서 제외한다.
 
+`serials.csv` 는 `category,location,item,serial,note` 다. `location` 에는
+PCI address(`0000:c1:00.0`), DIMM 슬롯(`P0 CHANNEL A`), 블록 장치(`/dev/nvme0n1`),
+CPU 소켓(`SP6`)이 들어가 어느 자리의 부품인지 바로 짚을 수 있다.
+
 **PART 1 — 하드웨어 점검 (읽기 전용)**
 
 | 항목 | 확인 내용 |
@@ -146,7 +182,7 @@ USB 이더넷(BMC 가상 NIC, gadget 등)은 장착 부품이 아니므로 S/N �
 | CPU 정보 | 모델 / 소켓 / 코어 / 스레드 / 최대 클럭 / S/N |
 | Memory 정보 | 총 용량 + DIMM 슬롯별 용량·속도·Part Number·S/N |
 | Storage 정보 | 디스크 목록·S/N + NVMe 온도·`critical_warning` |
-| GPU 정보 | 드라이버 / CUDA / 모델 / VBIOS / S/N / ECC |
+| GPU 정보 | `nvidia-smi` 기본 표 + 검수용 표(PCI address / VBIOS / S/N / ECC) |
 | PCIe 연결 상태 | **GPU 부하 인가 후** `LnkSta` vs `LnkCap` 속도·폭 비교 + dmesg PCIe 에러 |
 | Infiniband | 장치 인식 + `ibstat` 포트 State |
 | RAID Card | 컨트롤러 인식 + storcli/perccli 어레이 상태 |
@@ -188,8 +224,10 @@ GPU 번인, CPU 번인, 온도 로깅 **3개를 동시에** 돌리고 CSV까지 
 
 - `gadget_burn -t <초>` — GPU 번인
 - `stress -c $(nproc) -t <초>` — CPU 번인
-- `lib/gpu-cpu.sh <간격> <초>` — 온도 로깅
-- 끝나면 `lib/make-csv.sh` 로 CSV 생성
+- `lib/sample-sensors.sh <간격> <초> <출력.csv>` — 온도를 **CSV 로 바로** 기록
+
+중간 txt 를 만들지 않는다. 예전에는 `GPU_CPU_log.txt` 를 만든 뒤 `make-csv.sh` 로
+변환했는데, 그 파싱 단계에서 헤더와 데이터의 칼럼 수가 어긋나는 문제가 있었다.
 
 화면은 2초마다 **제자리에서 갱신**된다. 최고온도가 바뀔 때마다 줄이 쌓이지
 않으므로 GPU 가 10장이어도 화면이 흐르지 않는다.
@@ -198,41 +236,46 @@ GPU 번인, CPU 번인, 온도 로깅 **3개를 동시에** 돌리고 CSV까지 
  DEEPGadget SW 검수 번인 · deepgadget   경과 00:12:35 / 01:00:00   남은시간 00:47:25
  █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 21%
 ────────────────────────────────────────────────────────────────────────────────
- GPU   TEMP   MAX  SLOWDN        POWER W   CLK MHz   UTIL  THROTTLE
-   0     90    90       5  598.00/600.00      2175    97%  HWTHERM HWSLOW PWRCAP   [T 8s / P 20s]
-   1     73    90      22  598.00/600.00      2175    99%  PWRCAP                  [T 6s / P 22s]
+ GPU  PCI ADDRESS     TEMP   MAX   SLOWDN        POWER W   UTIL  SW POWER CAP (누적)
+   0  0000:c1:00.0      90    90        5  598.00/600.00   100%  ON 누적 620s
+   1  0000:c9:00.0      73    90       22  598.00/600.00    99%  ON 누적 615s
  CPU   85.4°C (max 86.1°C)   소켓별 [ 85.4 83.2 ]   128 threads @ stress
  NVMe  43°C (max 43°C)   로그 샘플 151개 · 5s 간격 · Ctrl-C 중단
 ────────────────────────────────────────────────────────────────────────────────
 ```
 
+- `PCI ADDRESS` — GPU 를 index 가 아니라 슬롯 주소로 식별한다
 - `SLOWDN` — 하드웨어 슬로우다운까지 남은 여유(°C, `temperature.gpu.tlimit`)
-- `THROTTLE` — `SWTHERM` / `HWTHERM` / `BRAKE` / `HWSLOW` / `PWRCAP`,
-  뒤의 `[T ..s / P ..s]` 는 **GPU 별** 열·전력 쓰로틀 누적 시간
-- Ctrl-C 로 중단해도 그 시점까지의 CSV를 만들고 끝낸다
+- `SW POWER CAP` — 전력 캡에 물려 있으면 `ON`, 뒤의 `누적 ..s` 는 **GPU 별**
+  전력 캡에 물린 누적 시간. 부하 중에 계속 `ON` 인 것은 정상이다(설정된 TDP 를
+  다 쓰고 있다는 뜻)
+- Ctrl-C 로 중단해도 그 시점까지의 CSV 가 남는다
 
-결과는 실행한 디렉터리 아래 `<host>_<시각>/` 에 모인다.
+결과는 실행한 디렉터리 아래 `burnin_<host>_<시각>/` 에 모인다.
 
 ```
-deepgadget_20260908_143000/
+burnin_deepgadget_20260908_143000/
 ├── GPU_CPU_deepgadget_20260908_143000.csv   ← 검수확인서에 붙일 파일
-├── GPU_CPU_log.txt        원본 로그
-├── output.csv             make-csv.sh 기본 산출물
 ├── gadget_burn.csv/.log   TFLOPS·전력·쓰로틀 상세
-├── stress.log / gpu-cpu.log / make-csv.log
+├── stress.log / sample-sensors.log
 ├── max-events.log         최고온도 갱신 이력
 └── system_info.txt        lscpu / nvidia-smi / nvme list 스냅샷
 ```
 
+CSV 컬럼은 이런 모양이다. GPU 는 PCI address 로 구분한다.
+
+```
+Timestamp,Elapsed(s),Memory_Used(MB),nvme0_Temp(C),CPU0_Tctl(C),
+GPU0_0000:c1:00.0_Temp(C),GPU0_0000:c1:00.0_Power(W),
+GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_SWPowerCap
+```
+
 ### 알아둘 것
 
-- **`make-csv.sh` 는 root 로 실행하면 안 된다.** root 에서 `lscpu` 가
-  `BIOS Vendor ID:` 줄을 하나 더 출력해 벤더 판별이 깨지고, **에러 없이 조용히**
-  CPU 온도 칼럼이 전부 빈다. `run-burnin.sh` 는 일반 계정으로 실행하도록 처리해 둔다.
-- `gpu-cpu.sh` 는 매 샘플마다 `sudo nvme smart-log` 를 부른다. tty 없이 미리
-  `sudo -v` 해둬도 ppid 티켓 때문에 안 먹히므로, `run-burnin.sh` 는 스크립트
-  전체를 root 로 한 번 승격시켜 돌린다.
-- NVMe 온도는 `/dev/nvme0` 만 수집한다 (`gpu-cpu.sh` 의 기존 동작).
+- `sample-sensors.sh` 는 매 샘플마다 `nvme smart-log` 를 부른다. root 가 필요해서
+  `run-burnin.sh` 가 스크립트 전체를 root 로 한 번 승격시켜 돌린다.
+  (tty 없이 미리 `sudo -v` 해두는 방식은 ppid 티켓 때문에 안 먹힌다)
+- NVMe 는 `/dev/nvme0`, `/dev/nvme1` … 전부 컬럼으로 들어간다.
 
 ---
 
@@ -241,7 +284,8 @@ deepgadget_20260908_143000/
 ```bash
 ./setup.sh          # 1) 서버 설정 + 도구 설치 (장비당 1회)
                     #    GRUB 안내가 나오면 편집 + update-grub + reboot
-./inspect.sh        # 2) 검수 → inspect_*.log
+./functest.sh       # 2) 기능 테스트 — HW 다 보이는지 + 5분 부하
+./inspect.sh        # 3) 검수 → inspect_<host>_<시각>/
                     #    ❌ 가 있으면 조치 후 다시 ./inspect.sh
-./run-burnin.sh     # 3) 1시간 번인 → CSV 를 검수확인서에 첨부
+./run-burnin.sh     # 4) 1시간 번인 → CSV 를 검수확인서에 첨부
 ```

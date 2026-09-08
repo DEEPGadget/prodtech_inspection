@@ -15,6 +15,7 @@
 #   ./inspect.sh                 # PCIe 측정 시 GPU 부하를 걸어 링크를 최대 속도로 올림
 #   ./inspect.sh --no-load       # 부하 없이 (유휴 링크 속도가 그대로 찍힘)
 #   ./inspect.sh --load-sec 120  # 부하 시간(기본 60초)
+#   ./inspect.sh --hw-only       # PART 1(하드웨어)만 하고 끝 — functest.sh 가 쓴다
 #
 # 결과는 실행한 디렉터리 아래 inspect_<host>_<시각>/ 에 모인다.
 #   inspect.log   전체 출력
@@ -30,11 +31,13 @@ fi
 
 # --check 는 예전 옵션. 이제 항상 읽기 전용이라 받아만 주고 무시한다.
 PCIE_LOAD=1
+HW_ONLY=0
 PCIE_LOAD_SEC=${PCIE_LOAD_SEC:-60}
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --check|--check-only|--no-apply) ;;
         --no-load) PCIE_LOAD=0 ;;
+        --hw-only) HW_ONLY=1 ;;
         --load-sec) shift; PCIE_LOAD_SEC=${1:-60} ;;
         -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
@@ -45,12 +48,17 @@ done
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 TZ_WANT="${TZ_WANT:-Asia/Seoul}"
 STAMP=$(date +%Y%m%d_%H%M%S)
-OUTDIR="$PWD/inspect_$(hostname)_${STAMP}"
+OUTDIR="${OUTDIR:-$PWD/inspect_$(hostname)_${STAMP}}"
 RAWDIR="$OUTDIR/raw"
 mkdir -p "$RAWDIR" || { echo "결과 디렉터리를 만들 수 없습니다: $OUTDIR" >&2; exit 1; }
 LOG_FILE="$OUTDIR/inspect.log"
 SN_CSV="$OUTDIR/serials.csv"
 exec > >(tee -a "$LOG_FILE") 2>&1
+TEE_PID=$!
+# 스크립트가 먼저 끝나면 tee 가 마지막 출력을 흘린다(요약이 통째로 잘림).
+# 종료 시 stdout/stderr 을 닫아 tee 에 EOF 를 주고 끝날 때까지 기다린다.
+flush_log() { exec 1>&- 2>&-; wait "$TEE_PID" 2>/dev/null || true; }
+trap flush_log EXIT
 
 RESULTS=()
 C_B=$'\033[1m'; C_RST=$'\033[0m'
@@ -65,9 +73,40 @@ kv()   { printf '   %-22s %s\n' "$1" "$2"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+print_group() {
+    local want=$1 title=$2 color=$3 count=0 line status name detail
+    for line in "${RESULTS[@]}"; do
+        IFS='|' read -r status name detail <<< "$line"
+        [[ "$status" == "$want" ]] && count=$((count + 1))
+    done
+    [[ $count -eq 0 ]] && return 0
+    printf '\n\033[1;%sm%s (%d개)\033[0m\n' "$color" "$title" "$count"
+    for line in "${RESULTS[@]}"; do
+        IFS='|' read -r status name detail <<< "$line"
+        [[ "$status" == "$want" ]] || continue
+        printf '   %-26s %s\n' "$name" "$detail"
+    done
+    return "$count"
+}
+
+# print_summary <제목>  —  --hw-only 로 중간에 끝낼 때도 같은 형식으로 낸다
+print_summary() {
+    printf '\n\033[1;34m'; hr; printf '  %s  —  %s\n' "$1" "$(hostname)"; hr; printf '\033[0m'
+    OK_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
+    print_group OK   "✅ 정상"      32 || OK_COUNT=$?
+    print_group FAIL "❌ 확인 필요" 31 || FAIL_COUNT=$?
+    print_group SKIP "⚠️  건너뜀"   33 || SKIP_COUNT=$?
+    printf '\n'; hr
+    printf '  정상 %d / 확인 필요 %d / 건너뜀 %d\n' "$OK_COUNT" "$FAIL_COUNT" "$SKIP_COUNT"
+    printf '  결과 : %s\n' "$OUTDIR"
+    printf '           inspect.log  /  serials.csv  /  raw/\n'
+    hr
+}
+
 # 구성품 S/N 수집: add_sn <분류> <식별자> <S/N> [비고]
 SERIALS=()
-add_sn() { SERIALS+=("$1|$2|$3|${4:-}"); }
+# add_sn <분류> <식별자> <위치(PCI address/슬롯)> <S/N> [비고]
+add_sn() { SERIALS+=("$1|$2|${3:--}|$4|${5:-}"); }
 # 값이 비었거나 의미 없는 자리표시자면 "-" 로 정규화
 sn_clean() {
     local v="${1//$'\t'/ }"; v="$(echo "$v" | sed 's/^ *//;s/ *$//')"
@@ -125,8 +164,8 @@ kv "메인보드" "${BB_VENDOR} ${BB_MODEL}"
 kv "보드 S/N"  "$BB_SN"
 kv "시스템 S/N" "$SYS_SN"
 kv "BIOS"      "$BIOS_VER"
-add_sn "Mainboard" "${BB_VENDOR} ${BB_MODEL}" "$BB_SN" "BIOS $BIOS_VER"
-[[ "$SYS_SN" != "-" ]] && add_sn "System" "chassis" "$SYS_SN"
+add_sn "Mainboard" "${BB_VENDOR} ${BB_MODEL}" "-" "$BB_SN" "BIOS $BIOS_VER"
+[[ "$SYS_SN" != "-" ]] && add_sn "System" "chassis" "-" "$SYS_SN"
 record OK "시스템/메인보드" "${BB_MODEL} / S/N ${BB_SN}"
 
 # ================================================================
@@ -155,7 +194,7 @@ while IFS='|' read -r sock ver sn cid; do
     sn=$(sn_clean "$sn")
     [[ "$sn" == "-" ]] && sn="CPUID $(echo "$cid" | tr -d ' ')"
     printf '   %-22s %s\n' "S/N (${sock})" "$sn"
-    add_sn "CPU" "${sock} ${ver}" "$sn"
+    add_sn "CPU" "${ver}" "$sock" "$sn"
     i=$((i+1))
 done < <(sudo dmidecode -t processor 2>/dev/null | awk '
     /^Processor Information/ {sock="";ver="";sn="";cid=""}
@@ -185,7 +224,7 @@ if have dmidecode; then
             [[ -z "$loc" ]] && continue
             dsn=$(sn_clean "$dsn")
             printf '   %-18s %-9s %-11s %-10s %-18s %s\n' "$loc" "$size" "$spd" "$mf" "$pn" "$dsn"
-            add_sn "DIMM" "$loc ${size} ${pn}" "$dsn"
+            add_sn "DIMM" "${size} ${mf} ${pn}" "$loc" "$dsn"
         done < <(sudo dmidecode -t memory 2>/dev/null | awk '
           function flush(){ if (size ~ /^[0-9]/) print loc"|"size"|"spd"|"mf"|"pn"|"sn;
                             size="";loc="";spd="";pn="";mf="";sn="" }
@@ -215,7 +254,7 @@ while read -r n sz tp sn rota model; do
     sn=$(sn_clean "$sn")
     [[ "$rota" == "1" ]] && rota="HDD" || rota="SSD"
     printf '   %-12s %-9s %-24s %-22s %s\n' "$n" "$sz" "${model:-?}" "$sn" "$rota"
-    add_sn "Storage" "$n ${sz} ${model}" "$sn"
+    add_sn "Storage" "${sz} ${model}" "/dev/$n" "$sn"
 done < <(lsblk -dno NAME,SIZE,TYPE,SERIAL,ROTA,MODEL)
 DISK_N=$(lsblk -dno TYPE | grep -c '^disk$')
 if have nvme; then
@@ -239,7 +278,9 @@ if have nvidia-smi; then
     kv "Driver"  "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
     kv "CUDA"    "$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9.]+' | head -1)"
     kv "GPU 수"  "${GPU_N} EA"
-    printf '\n   %-4s %-42s %-16s %-11s %-10s %s\n' "IDX" "NAME" "VBIOS" "MEMORY" "S/N출처" "S/N (없으면 UUID)"
+    printf '\n'
+    nvidia-smi 2>/dev/null | sed 's/^/   /'
+    printf '\n   %-4s %-14s %-34s %-16s %-9s %s\n' "IDX" "PCI ADDRESS" "NAME" "VBIOS" "S/N출처" "S/N (없으면 UUID)"
     GPU_NOSN=0
     while IFS=',' read -r i n v sn uuid bus m; do
         [[ -z "$i" ]] && continue
@@ -248,13 +289,15 @@ if have nvidia-smi; then
         # nvidia-smi 가 N/A 를 낸다. 그럴 땐 GPU UUID 를 고유 식별자로 쓴다.
         if [[ "$sn" == "-" ]]; then
             ident="$uuid"; src="UUID"; GPU_NOSN=$((GPU_NOSN+1))
-            note="VBIOS ${v// /} / ${bus} / 보드 S/N 미제공(소비자용 카드) → UUID"
+            note="VBIOS ${v// /} / 보드 S/N 미제공(소비자용 카드) → UUID"
         else
             ident="$sn"; src="보드S/N"
-            note="VBIOS ${v// /} / ${bus}"
+            note="VBIOS ${v// /}"
         fi
-        printf '   %-4s %-42s %-16s %-11s %-10s %s\n' "$i" "$(echo "${n# }" | cut -c1-42)" "${v// /}" "${m# }" "$src" "$ident"
-        add_sn "GPU" "GPU${i} ${n# }" "$ident" "$note"
+        # nvidia-smi 는 "00000000:C1:00.0" 로 준다 → lspci 표기 "0000:c1:00.0" 로 맞춘다
+        sbdf=$(echo "$bus" | tr 'A-F' 'a-f'); sbdf=${sbdf: -12}
+        printf '   %-4s %-14s %-34s %-16s %-9s %s\n' "$i" "$sbdf" "$(echo "${n# }" | cut -c1-34)" "${v// /}" "$src" "$ident"
+        add_sn "GPU" "${n# }" "$sbdf" "$ident" "$note"
     done < <(nvidia-smi --query-gpu=index,name,vbios_version,serial,uuid,pci.bus_id,memory.total --format=csv,noheader)
     if [[ "$GPU_NOSN" -gt 0 ]]; then
         printf '   ※ %d장은 보드 S/N 이 없는 소비자용 카드입니다(GeForce 계열). UUID 를 식별자로 기록했습니다.\n' "$GPU_NOSN"
@@ -307,7 +350,7 @@ gpu_load_stop() {
     wait "$GPULOAD_PID" 2>/dev/null
     GPULOAD_PID=""
 }
-trap 'gpu_load_stop' EXIT INT TERM
+trap 'gpu_load_stop; flush_log' EXIT INT TERM
 gpu_load_start
 # GPU 는 LnkSta(현재) 와 LnkCap(카드 능력)을 같이 본다.
 # NOTE: 온보드 NIC 등이 x4 로 뜨는 것은 설계상 정상인 경우가 많다.
@@ -399,13 +442,13 @@ else
         sudo "$RAID_TOOL" /c0 show 2>/dev/null | head -30 | sed 's/^/   /'
         RAID_SN=$(sn_clean "$(grep -iE "Serial Number" "$RAWDIR/raid-controller.txt" 2>/dev/null | head -1 | awk -F'= *|: *' '{print $NF}')")
         kv "RAID S/N" "$RAID_SN"
-        add_sn "RAID" "$(echo "$RAID_LIST" | head -1 | cut -d: -f3- | sed 's/^ *//' | cut -c1-48)" "$RAID_SN"
+        add_sn "RAID" "$(echo "$RAID_LIST" | head -1 | cut -d: -f3- | sed 's/^ *//' | cut -c1-48)" "$(echo "$RAID_LIST" | head -1 | awk '{print $1}')" "$RAID_SN"
         record OK "RAID Card" "$(echo "$RAID_LIST" | head -1 | cut -c1-60) / $RAID_TOOL / S/N $RAID_SN"
     else
         warn "RAID 관리도구(storcli/perccli/MegaCli 등)가 없어 어레이 상태·S/N 을 읽지 못했습니다."
         while read -r bdf; do
             dsn=$(sudo lspci -vv -s "$bdf" 2>/dev/null | grep -i "Device Serial Number" | awk '{print $NF}' | head -1)
-            add_sn "RAID" "$(lspci -s "$bdf" | cut -d: -f3- | sed 's/^ *//' | cut -c1-48)" "$(sn_clean "$dsn")" "관리도구 없음"
+            add_sn "RAID" "$(lspci -s "$bdf" | cut -d: -f3- | sed 's/^ *//' | cut -c1-48)" "$bdf" "$(sn_clean "$dsn")" "관리도구 없음"
         done < <(echo "$RAID_LIST" | awk '{print $1}')
         record FAIL "RAID Card" "카드는 인식됨 / 관리도구 없음 — storcli 설치 후 어레이 상태·S/N 확인 필요"
     fi
@@ -449,7 +492,7 @@ for i in /sys/class/net/*; do
             # DSN 은 카드 단위라 듀얼포트 카드의 두 포트가 같은 값을 갖는다(정상).
             if [[ -n "$dsn" ]]; then src="PCIe DSN(카드 공통)"; else src="고정MAC"; fi
             note="$src"; [[ -n "$fw" ]] && note="$note / fw $fw"
-            add_sn "NIC" "${n} (${sp}) ${model}" "$sn" "$note"
+            add_sn "NIC" "${n} (${sp}) ${model}" "$bdf" "$sn" "$note"
     fi
 done
 
@@ -457,7 +500,8 @@ done
 for d in /sys/class/infiniband/*; do
     [[ -d "$d" ]] || continue
     ca=$(basename "$d")
-    add_sn "IB/HCA" "$ca $(cat "$d/board_id" 2>/dev/null)" \
+    ibbdf=$(basename "$(readlink -f "$d/device" 2>/dev/null)" 2>/dev/null)
+    add_sn "IB/HCA" "$ca $(cat "$d/board_id" 2>/dev/null)" "${ibbdf:--}" \
            "$(cat "$d/node_guid" 2>/dev/null)" "fw $(cat "$d/fw_ver" 2>/dev/null) (node_guid)"
 done
 if have network-test; then
@@ -530,16 +574,16 @@ if [[ ${#SERIALS[@]} -eq 0 ]]; then
     warn "수집된 S/N 이 없습니다."
     record FAIL "구성품 S/N" "수집 실패"
 else
-    printf '   %-10s %-50s %-24s %s\n' "분류" "식별자" "S/N" "비고"
-    printf '   %-10s %-50s %-24s %s\n' "----------" "--------------------------------------------------" "------------------------" "--------"
-    printf 'category,item,serial,note\n' > "$SN_CSV"
+    printf '   %-10s %-16s %-40s %-24s %s\n' "분류" "위치" "식별자" "S/N" "비고"
+    printf '   %-10s %-16s %-40s %-24s %s\n' "----------" "----------------" "----------------------------------------" "------------------------" "--------"
+    printf 'category,location,item,serial,note\n' > "$SN_CSV"
     SN_MISS=0
     for line in "${SERIALS[@]}"; do
-        IFS='|' read -r cat item sn note <<< "$line"
+        IFS='|' read -r cat item loc sn note <<< "$line"
         [[ "$sn" == "-" ]] && SN_MISS=$((SN_MISS+1))
-        printf '   %-10s %-50s %-24s %s\n' "$cat" "$(echo "$item" | cut -c1-50)" "$sn" "$note"
+        printf '   %-10s %-16s %-40s %-24s %s\n' "$cat" "$loc" "$(echo "$item" | cut -c1-40)" "$sn" "$note"
         # CSV: 쉼표가 든 값은 큰따옴표로 감싼다
-        printf '"%s","%s","%s","%s"\n' "${cat//\"/\"\"}" "${item//\"/\"\"}" "${sn//\"/\"\"}" "${note//\"/\"\"}" >> "$SN_CSV"
+        printf '"%s","%s","%s","%s","%s"\n' "${cat//\"/\"\"}" "${loc//\"/\"\"}" "${item//\"/\"\"}" "${sn//\"/\"\"}" "${note//\"/\"\"}" >> "$SN_CSV"
     done
     printf '\n   총 %d개 항목 / S/N 미제공 %d개  →  %s\n' "${#SERIALS[@]}" "$SN_MISS" "$SN_CSV"
     if [[ "$SN_MISS" -eq 0 ]]; then
@@ -548,6 +592,11 @@ else
         # CPU S/N 처럼 하드웨어가 아예 안 내놓는 값도 있어 실패로 보지 않는다.
         record OK "구성품 S/N" "${#SERIALS[@]}개 중 ${SN_MISS}개는 하드웨어가 S/N 을 노출하지 않음 — serials.csv"
     fi
+fi
+
+if [[ "$HW_ONLY" -eq 1 ]]; then
+    print_summary "하드웨어 점검 결과"
+    exit $(( FAIL_COUNT > 0 ? 1 : 0 ))
 fi
 
 # ================================================================
@@ -606,7 +655,10 @@ title "자동 업데이트 중지"
 # 타이머가 계속 깨어나 /var/lib/dpkg/lock 을 잡아 수동 apt 작업이 막힌다.
 AUTOUPD_UNITS=(apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service)
 for u in "${AUTOUPD_UNITS[@]}"; do
-    if ! systemctl list-unit-files 2>/dev/null | grep -q "^${u//./\\.}[[:space:]]"; then
+    # 주의: pipefail 아래에서 `... | grep -q` 는 grep 이 파이프를 일찍 닫아
+    #       앞 명령이 SIGPIPE(141)로 죽으면 매칭 성공인데도 실패로 뒤집힌다.
+    #       systemctl 의 패턴 인자를 써서 파이프 자체를 없앤다.
+    if [[ -z "$(systemctl list-unit-files "$u" --no-legend 2>/dev/null)" ]]; then
         record SKIP "자동업데이트: $u" "해당 unit 없음"
         continue
     fi
@@ -695,33 +747,7 @@ fi
 # ================================================================
 #  요약
 # ================================================================
-print_group() {
-    local want=$1 title=$2 color=$3 count=0 line status name detail
-    for line in "${RESULTS[@]}"; do
-        IFS='|' read -r status name detail <<< "$line"
-        [[ "$status" == "$want" ]] && count=$((count + 1))
-    done
-    [[ $count -eq 0 ]] && return 0
-    printf '\n\033[1;%sm%s (%d개)\033[0m\n' "$color" "$title" "$count"
-    for line in "${RESULTS[@]}"; do
-        IFS='|' read -r status name detail <<< "$line"
-        [[ "$status" == "$want" ]] || continue
-        printf '   %-26s %s\n' "$name" "$detail"
-    done
-    return "$count"
-}
-
-printf '\n\033[1;34m'; hr; printf '  SW 검수 결과 요약  —  %s\n' "$(hostname)"; hr; printf '\033[0m'
-print_group OK   "✅ 정상"      32 || OK_COUNT=$?
-print_group FAIL "❌ 확인 필요" 31 || FAIL_COUNT=$?
-print_group SKIP "⚠️  건너뜀"   33 || SKIP_COUNT=$?
-OK_COUNT=${OK_COUNT:-0}; FAIL_COUNT=${FAIL_COUNT:-0}; SKIP_COUNT=${SKIP_COUNT:-0}
-
-printf '\n'; hr
-printf '  정상 %d / 확인 필요 %d / 건너뜀 %d\n' "$OK_COUNT" "$FAIL_COUNT" "$SKIP_COUNT"
-printf '  결과 : %s\n' "$OUTDIR"
-printf '           inspect.log  /  serials.csv  /  raw/\n'
-hr
+print_summary "SW 검수 결과 요약"
 
 if [[ "${GRUB_ACTION:-none}" != none ]]; then
     printf '\n\033[1;33m'; hr
