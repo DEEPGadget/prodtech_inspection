@@ -16,7 +16,7 @@
 #   ./setup.sh --full             # + 벤치마크/진단 도구 전부
 #   ./setup.sh --full /opt/bench  # 외부 저장소를 다른 경로에 설치
 #
-# 로그는 실행한 디렉터리에 setup_<host>_<시각>.log 로 남는다.
+# 결과는 실행한 디렉터리 아래 setup_<host>_<시각>/setup.log 로 남는다.
 
 set -uo pipefail
 
@@ -40,7 +40,9 @@ BASE_DIR="${BASE_DIR:-$SCRIPT_DIR}"
 TZ_WANT="${TZ_WANT:-Asia/Seoul}"
 
 mkdir -p "$BASE_DIR" || { echo "설치 경로를 만들 수 없습니다: $BASE_DIR" >&2; exit 1; }
-LOG_FILE="$PWD/setup_$(hostname)_$(date +%Y%m%d_%H%M%S).log"
+OUTDIR="$PWD/setup_$(hostname)_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUTDIR" || { echo "결과 디렉터리를 만들 수 없습니다: $OUTDIR" >&2; exit 1; }
+LOG_FILE="$OUTDIR/setup.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # CUDA: 인스톨러가 ~/.bashrc 끝에 넣는 PATH 는 비대화형 셸에서 로드되지 않으므로 직접 넣는다.
@@ -76,7 +78,7 @@ hr; printf '  DEEPGadget 출고 설정 + 도구 설치  —  %s\n' "$(hostname)"
 printf '\033[0m'
 printf '   설치 경로 : %s\n' "$BASE_DIR"
 printf '   모드      : %s\n' "$([ "$FULL" -eq 1 ] && echo '--full (벤치마크 도구 포함)' || echo '기본 (번인 최소 구성)')"
-printf '   로그      : %s\n' "$LOG_FILE"
+printf '   결과경로  : %s\n' "$OUTDIR"
 
 log "sudo 권한 확인"
 sudo -v || { err "sudo 권한이 필요합니다."; exit 1; }
@@ -407,7 +409,7 @@ OK_COUNT=${OK_COUNT:-0}; FAIL_COUNT=${FAIL_COUNT:-0}; SKIP_COUNT=${SKIP_COUNT:-0
 printf '\n'; hr
 printf '  성공 %d / 실패 %d / 생략 %d\n' "$OK_COUNT" "$FAIL_COUNT" "$SKIP_COUNT"
 printf '  설치 경로 : %s\n' "$BASE_DIR"
-printf '  로그      : %s\n' "$LOG_FILE"
+printf '  결과      : %s\n' "$OUTDIR"
 hr
 
 if [[ "${GRUB_ACTION:-none}" != none ]]; then

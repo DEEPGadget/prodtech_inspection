@@ -78,7 +78,7 @@ cd prodtech_inspection
 | gpu-burn | — | ✓ clone + make |
 | fio | — | ✓ clone + build + install |
 
-로그: `setup_<host>_<시각>.log` — make 출력이 길어도 맨 끝 요약에 항목별 성공/실패가 모인다.
+결과: `setup_<host>_<시각>/setup.log` — make 출력이 길어도 맨 끝 요약에 항목별 성공/실패가 모인다.
 
 ---
 
@@ -87,28 +87,71 @@ cd prodtech_inspection
 하드웨어 점검과 서버 설정을 한 번에 한다. 빌드는 포함하지 않는다.
 
 ```bash
-./inspect.sh
+./inspect.sh                 # PCIe 측정 시 GPU 부하를 걸어 링크를 최대 속도로 올림
+./inspect.sh --no-load       # 부하 없이
+./inspect.sh --load-sec 120  # 부하 시간 (기본 60초)
 ```
 
 아무것도 바꾸지 않는다. 하드웨어를 조사하고, `setup.sh` 가 적용해 둔 설정이
 실제로 걸려 있는지 확인해 합격/불합격만 보고한다.
 (`--check` 는 예전 옵션 — 받아만 주고 무시한다.)
 
+결과는 실행한 디렉터리 아래 한 폴더에 모인다.
+
+```
+inspect_<host>_<시각>/
+├── inspect.log     전체 출력
+├── serials.csv     구성품 S/N 목록  ← 검수확인서에 그대로 붙일 수 있다
+└── raw/            lspci -vvv, dmidecode, nvidia-smi -q, ipmitool sdr/sensor/fru,
+                    lsblk -O, sensors, ip -d addr, lsusb -t, nvme list, dmesg 발췌
+```
+
+### PCIe 측정 전에 GPU 부하를 거는 이유
+
+NVIDIA GPU 는 유휴일 때 링크를 Gen1 으로 내린다. 그 상태로 읽으면 멀쩡한 카드가
+`Speed 2.5GT/s (downgraded)` 로 보인다.
+
+```
+유휴      LnkSta: Speed 2.5GT/s (downgraded), Width x16
+부하 +3s  LnkSta: Speed 32GT/s, Width x16          ← LnkCap 과 일치
+```
+
+그래서 PCIe 항목에 들어가기 직전 `gadget_burn` 을 백그라운드로 띄우고, 링크가
+재협상될 시간을 준 뒤 읽고, 측정이 끝나면 바로 끝낸다. 부하를 걸었을 때만
+속도까지 합격 판정하고, 못 걸었으면 "속도 판정 불가" 로 남긴다.
+
+### 구성품 S/N
+
+| 분류 | 출처 | 비고 |
+|---|---|---|
+| Mainboard | `dmidecode` baseboard-serial-number | BIOS 버전 함께 기록 |
+| CPU | `dmidecode -t processor` Serial Number | 대부분 `Unknown` → CPUID 로 대체 |
+| DIMM | `dmidecode -t memory` Serial Number | Bank Locator(슬롯)별 |
+| Storage | `lsblk SERIAL` | SATA/NVMe 공통 |
+| GPU | `nvidia-smi --query-gpu=serial` | VBIOS 함께 기록 |
+| NIC | PCIe Device Serial Number, 없으면 고정 MAC(`ethtool -P`) | DSN 은 카드 단위라 듀얼포트면 두 포트가 같은 값 |
+| IB/HCA | `/sys/class/infiniband/*/node_guid` | board_id·fw 함께 기록 |
+| RAID | storcli/perccli `show all`, 없으면 PCIe DSN | 관리도구 없으면 불합격 처리 |
+
+USB 이더넷(BMC 가상 NIC, gadget 등)은 장착 부품이 아니므로 S/N 목록에서 제외한다.
+
 **PART 1 — 하드웨어 점검 (읽기 전용)**
 
 | 항목 | 확인 내용 |
 |---|---|
-| CPU 정보 | 모델 / 소켓 / 코어 / 스레드 / 최대 클럭 |
-| Memory 정보 | 총 용량 + DIMM 슬롯별 용량·속도·Part Number |
-| Storage 정보 | 디스크 목록 + NVMe 온도·`critical_warning` |
+| 시스템 / 메인보드 | 제조사 / 모델 / 보드 S/N / BIOS 버전 |
+| CPU 정보 | 모델 / 소켓 / 코어 / 스레드 / 최대 클럭 / S/N |
+| Memory 정보 | 총 용량 + DIMM 슬롯별 용량·속도·Part Number·S/N |
+| Storage 정보 | 디스크 목록·S/N + NVMe 온도·`critical_warning` |
 | GPU 정보 | 드라이버 / CUDA / 모델 / VBIOS / S/N / ECC |
-| PCIe 연결 상태 | `LnkSta` vs `LnkCap` 폭 비교 + dmesg PCIe 에러 |
+| PCIe 연결 상태 | **GPU 부하 인가 후** `LnkSta` vs `LnkCap` 속도·폭 비교 + dmesg PCIe 에러 |
 | Infiniband | 장치 인식 + `ibstat` 포트 State |
 | RAID Card | 컨트롤러 인식 + storcli/perccli 어레이 상태 |
 | 기타 추가 부품 | GPU·NIC·RAID·IB 로 분류되지 않은 PCIe 장치 |
-| Network 상태 | 인터페이스 up/down / speed / IPv4 / MAC |
+| Network 상태 | 인터페이스 up/down / speed / IPv4 / MAC / BDF / 드라이버 |
 | USB 포트 상태 | Bus 별 장치 수 |
 | PSU 상태 | PSU 인식 수 / Power In·Out / 온도 / Fan RPM |
+| 구성품 S/N | 위 항목에서 모은 S/N 을 표 + `serials.csv` 로 |
 
 **PART 2 — 서버 설정 확인 (읽기 전용)**
 
@@ -125,8 +168,6 @@ cd prodtech_inspection
 
 마지막에 정상 / 확인 필요 / 건너뜀 으로 요약이 나오고,
 확인 필요 항목이 하나라도 있으면 exit code 1 로 끝난다.
-
-로그: `inspect_<host>_<시각>.log`
 
 > BIOS 설정과 Gadgetini 그래프 확인은 범위 밖이다.
 > GRUB 항목에서 BIOS 에서 확인할 값(VT-d / ACS Control)을 안내만 한다.
