@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# inspect.sh — DEEPGadget 출고 검수: 하드웨어 점검 + 서버 설정
+# inspect.sh — DEEPGadget 출고 검수 (읽기 전용)
 #
-#   Check_server_information/test.sh (HW 리스트) 와
-#   setup_tools.sh (서버 설정) 를 하나로 합친 것.
-#   빌드(gadget-burn/nccl-tests/fio/gpu-burn)는 setup.sh 로 분리했다 —
-#   make 출력 수백 줄이 점검 결과를 덮어버리기 때문.
+#   구 Check_server_information/test.sh (HW 리스트) 와 구 setup_tools.sh
+#   (서버 설정) 를 대체한다. 이 저장소 하나로 검수가 끝난다.
+#
+#   이 스크립트는 아무것도 바꾸지 않는다. 하드웨어를 조사하고, setup.sh 가
+#   적용해 둔 서버 설정이 실제로 걸려 있는지 확인해 합격/불합격만 보고한다.
+#   설정을 바꾸는 것도, 도구를 빌드하는 것도 setup.sh 담당이다.
+#     - 설정이 안 걸려 있다고 나오면  → ./setup.sh 를 (다시) 실행
+#     - 도구가 없다고 나오면          → ./setup.sh 를 실행
 #
 # 사용법:
-#   ./inspect.sh            # 하드웨어 점검 + 서버 설정 적용
-#   ./inspect.sh --check    # 아무것도 바꾸지 않고 점검만 (재검수용)
+#   ./inspect.sh
 #
 # 로그는 실행한 디렉터리에 inspect_<host>_<시각>.log 로 남는다.
 
@@ -20,11 +23,11 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     exit 1
 fi
 
-APPLY=1
+# --check 는 예전 옵션. 이제 항상 읽기 전용이라 받아만 주고 무시한다.
 for a in "$@"; do
     case "$a" in
-        --check|--check-only|--no-apply) APPLY=0 ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        --check|--check-only|--no-apply) ;;
+        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
         *) echo "알 수 없는 옵션: $a" >&2; exit 1 ;;
     esac
 done
@@ -56,7 +59,7 @@ printf '\033[0m'
 kv "호스트" "$(hostname)"
 kv "일시"   "$(date '+%Y-%m-%d %H:%M:%S %Z')"
 kv "OS"     "$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME") / kernel $(uname -r)"
-kv "모드"   "$([ "$APPLY" -eq 1 ] && echo '점검 + 설정 적용' || echo '점검만 (--check)')"
+kv "모드"   "읽기 전용 — 설정은 바꾸지 않습니다 (변경은 ./setup.sh)"
 kv "로그"   "$LOG_FILE"
 
 log "sudo 권한 확인"
@@ -335,7 +338,7 @@ fi
 #  PART 2 — 서버 설정
 # ================================================================
 printf '\n\033[1;35m'
-hr; printf ' PART 2.  서버 설정  %s\n' "$([ "$APPLY" -eq 1 ] && echo '(적용)' || echo '(점검만)')"; hr
+hr; printf ' PART 2.  서버 설정 확인   (변경은 ./setup.sh 가 한다)\n'; hr
 printf '\033[0m'
 
 # ---------------------------------------------------------------- Time Zone
@@ -346,28 +349,14 @@ kv "NTP 동기화" "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)"
 if [[ "$TZ_NOW" == "$TZ_WANT" ]]; then
     ok "Time Zone: $TZ_NOW"
     record OK "Time Zone" "$TZ_NOW"
-elif [[ "$APPLY" -eq 1 ]]; then
-    if sudo timedatectl set-timezone "$TZ_WANT"; then
-        ok "Time Zone: $TZ_NOW → $TZ_WANT 로 변경"
-        record OK "Time Zone" "$TZ_NOW → $TZ_WANT 로 변경함"
-    else
-        err "Time Zone 변경 실패"
-        record FAIL "Time Zone" "$TZ_NOW — $TZ_WANT 로 변경 실패"
-    fi
 else
-    warn "Time Zone 이 $TZ_WANT 가 아닙니다 (현재 $TZ_NOW)"
-    record FAIL "Time Zone" "$TZ_NOW — $TZ_WANT 아님 (--check 라 변경 안 함)"
+    err "Time Zone 이 $TZ_WANT 가 아닙니다 (현재 $TZ_NOW) → ./setup.sh"
+    record FAIL "Time Zone" "$TZ_NOW — $TZ_WANT 아님, ./setup.sh 실행 필요"
 fi
 
 # ---------------------------------------------------------------- 전원관리
 title "전원관리 서비스 비활성화"
 SLEEP_TARGETS=(sleep.target suspend.target hibernate.target hybrid-sleep.target)
-if [[ "$APPLY" -eq 1 ]]; then
-    # sleep.target 계열은 static unit 이라 disable 시 "no install section" 경고가 정상.
-    # 실제 차단은 mask 가 담당한다.
-    sudo systemctl disable "${SLEEP_TARGETS[@]}" 2>/dev/null || true
-    sudo systemctl mask "${SLEEP_TARGETS[@]}"
-fi
 # NOTE: masked 유닛에서 is-enabled 는 "masked" 를 출력하면서 exit 1 을 낸다.
 #       파이프로 검사하면 pipefail 때문에 성공인데 실패로 판정되므로 문자열 비교 사용.
 for t in "${SLEEP_TARGETS[@]}"; do
@@ -379,18 +368,17 @@ if [[ "$(systemctl is-enabled sleep.target 2>/dev/null)" == masked ]]; then
     ok "sleep/suspend/hibernate 차단됨 (masked)"
     record OK "전원관리(sleep/suspend)" "masked — 절전 진입 차단됨"
 else
-    err "sleep.target 이 masked 가 아닙니다"
-    record FAIL "전원관리(sleep/suspend)" "masked 아님 — sudo systemctl mask sleep.target 필요"
+    err "sleep.target 이 masked 가 아닙니다 → ./setup.sh"
+    record FAIL "전원관리(sleep/suspend)" "masked 아님 — ./setup.sh 실행 필요"
 fi
 
 if have powerprofilesctl; then
-    [[ "$APPLY" -eq 1 ]] && sudo powerprofilesctl set performance 2>/dev/null
     PP=$(powerprofilesctl get 2>/dev/null)
     kv "power profile" "${PP:-?}"
     if [[ "$PP" == performance ]]; then
         record OK "전원 프로파일" "performance"
     else
-        record FAIL "전원 프로파일" "현재=${PP:-unknown} — performance 아님"
+        record FAIL "전원 프로파일" "현재=${PP:-unknown} — performance 아님, ./setup.sh 실행 필요"
     fi
 else
     record SKIP "전원 프로파일" "powerprofilesctl 없음 (apt install power-profiles-daemon)"
@@ -406,43 +394,20 @@ for u in "${AUTOUPD_UNITS[@]}"; do
         record SKIP "자동업데이트: $u" "해당 unit 없음"
         continue
     fi
-    if [[ "$APPLY" -eq 1 ]]; then
-        sudo systemctl stop    "$u" 2>/dev/null || true
-        sudo systemctl disable "$u" 2>/dev/null || true
-        sudo systemctl mask    "$u"
-    fi
     en=$(systemctl is-enabled "$u" 2>/dev/null); en=${en:-not-found}
     ac=$(systemctl is-active  "$u" 2>/dev/null); ac=${ac:-inactive}
     printf '   %-30s enabled=%-10s active=%s\n' "$u" "$en" "$ac"
     if [[ "$en" == masked ]]; then
         record OK "자동업데이트: $u" "masked"
     else
-        record FAIL "자동업데이트: $u" "enabled=$en — masked 아님"
+        record FAIL "자동업데이트: $u" "enabled=$en — masked 아님, ./setup.sh 실행 필요"
     fi
 done
-[[ "$APPLY" -eq 1 ]] && sudo systemctl daemon-reload
 printf '   해제하려면: sudo systemctl unmask %s\n' "${AUTOUPD_UNITS[*]}"
 
 # ---------------------------------------------------------------- Persistence Mode
 title "NVIDIA Persistence Mode"
 if have nvidia-smi; then
-    if [[ "$APPLY" -eq 1 ]]; then
-        sudo tee /etc/systemd/system/nvidia-pm.service > /dev/null <<'EOF'
-[Unit]
-Description=Enable NVIDIA Persistence Mode
-After=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/nvidia-smi -pm 1
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now nvidia-pm.service >/dev/null 2>&1
-    fi
     PM_STATE=$(nvidia-smi -q 2>/dev/null | grep -i "Persistence Mode" | head -1 | awk -F': ' '{print $2}')
     SVC=$(systemctl is-enabled nvidia-pm.service 2>/dev/null); SVC=${SVC:-not-found}
     kv "Persistence Mode" "${PM_STATE:-unknown}"
@@ -450,7 +415,8 @@ EOF
     if [[ "$PM_STATE" == *Enabled* && "$SVC" == enabled ]]; then
         record OK "NVIDIA Persistence Mode" "Enabled / 서비스 등록됨 (재부팅 후 유지)"
     else
-        record FAIL "NVIDIA Persistence Mode" "state=${PM_STATE:-unknown} service=$SVC"
+        err "Persistence Mode 미설정 → ./setup.sh"
+        record FAIL "NVIDIA Persistence Mode" "state=${PM_STATE:-unknown} service=$SVC — ./setup.sh 실행 필요"
     fi
 else
     record SKIP "NVIDIA Persistence Mode" "nvidia-smi 없음"
@@ -458,54 +424,23 @@ fi
 
 # ---------------------------------------------------------------- ACS
 title "OS ACS Disable"
-# ACS 가 켜져 있으면 PCIe P2P 트래픽이 루트 컴플렉스로 우회돼 GPUDirect/NCCL 성능이
-# 크게 떨어진다. setpci 는 재부팅하면 초기화되므로 systemd 서비스로 등록한다.
+# ACS 가 켜져 있으면 PCIe P2P 트래픽이 루트 컴플렉스로 우회돼 GPUDirect/NCCL
+# 성능이 크게 떨어진다. 비활성화는 setup.sh 가 disable-acs.service 로 등록한다.
 if ! have setpci || ! have lspci; then
-    record SKIP "OS ACS Disable" "pciutils 없음 (apt install pciutils)"
+    record SKIP "OS ACS Disable" "pciutils 없음 — ./setup.sh 실행 필요"
 else
-    ACS_BEFORE=$(sudo lspci -vvv 2>/dev/null | grep ACSCtl | grep -c 'SrcValid+' || true)
-    if [[ "$APPLY" -eq 1 ]]; then
-        sudo tee /usr/local/sbin/disable_acs.sh > /dev/null <<'EOF'
-#!/bin/bash
-# This script must be run with root privileges.
-if [ "$EUID" -ne 0 ]; then
-  echo "Error: run as root (e.g. sudo ./disable_acs.sh)"; exit 1
-fi
-echo "Disabling ACS on all PCIe devices..."
-for BDF in $(lspci | awk '{print $1}'); do
-    setpci -s ${BDF} ECAP_ACS+0x6.w > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        echo "Disabling ACS on device [${BDF}]..."
-        setpci -s ${BDF} ECAP_ACS+0x6.w=0000
-    fi
-done
-echo "Done. Verify with: sudo lspci -vvv | grep ACSCtl"
-EOF
-        sudo chmod +x /usr/local/sbin/disable_acs.sh
-        sudo tee /etc/systemd/system/disable-acs.service > /dev/null <<'EOF'
-[Unit]
-Description=Disable PCIe ACS at boot
-After=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/disable_acs.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now disable-acs.service >/dev/null 2>&1
-    fi
-    ACS_AFTER=$(sudo lspci -vvv 2>/dev/null | grep ACSCtl | grep -c 'SrcValid+' || true)
+    ACS_ON=$(sudo lspci -vvv 2>/dev/null | grep ACSCtl | grep -c 'SrcValid+' || true)
     SVC=$(systemctl is-enabled disable-acs.service 2>/dev/null); SVC=${SVC:-not-found}
-    kv "ACSCtl SrcValid+" "${ACS_BEFORE:-0}개 → ${ACS_AFTER:-0}개"
+    kv "ACSCtl SrcValid+" "${ACS_ON:-0}개  (0이어야 정상)"
     kv "disable-acs.service" "$SVC"
-    if [[ "${ACS_AFTER:-1}" -eq 0 ]]; then
-        record OK "OS ACS Disable" "SrcValid+ 0개 / 서비스=$SVC"
+    if [[ "${ACS_ON:-1}" -eq 0 && "$SVC" == enabled ]]; then
+        record OK "OS ACS Disable" "SrcValid+ 0개 / 서비스 등록됨"
+    elif [[ "${ACS_ON:-1}" -ne 0 ]]; then
+        err "ACS 가 켜진 장치 ${ACS_ON}개 — ./setup.sh 실행, 그래도 남으면 BIOS 에서 VT-d(AMD-V)/ACS Control Disabled"
+        record FAIL "OS ACS Disable" "SrcValid+ ${ACS_ON}개 남음 — ./setup.sh 또는 BIOS 설정 필요"
     else
-        record FAIL "OS ACS Disable" "SrcValid+ ${ACS_AFTER}개 남음 — BIOS 에서 VT-d(AMD-V)/ACS Control Disabled 필요"
+        err "SrcValid+ 는 0개이나 disable-acs.service 가 $SVC — 재부팅하면 되살아납니다"
+        record FAIL "OS ACS Disable" "서비스=$SVC — ./setup.sh 실행 필요"
     fi
 fi
 

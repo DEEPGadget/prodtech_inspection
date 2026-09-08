@@ -4,7 +4,7 @@
 #
 #   1) gadget-burn/gadget_burn                                   (GPU 번인)
 #   2) stress -c <코어수>                                         (CPU 번인)
-#   3) Check_server_information/gpu-cpu.sh <interval> <duration>  (온도 로깅)
+#   3) lib/gpu-cpu.sh <interval> <duration>                       (온도 로깅)
 #   위 3개를 동시에 실행하고, 현재 GPU/CPU 온도와 GPU 쓰로틀 상태를
 #   터미널에 실시간 갱신 표시한다. 종료 후 make-csv.sh 로 CSV를 생성한다.
 #
@@ -47,25 +47,22 @@ find_file() {          # find_file <파일명> <후보경로...>
 
 GPUCPU_SH=$(find_file gpu-cpu.sh \
   "${LIB_DIR:-$SCRIPT_DIR/lib}/gpu-cpu.sh" \
-  "$SCRIPT_DIR/gpu-cpu.sh" \
-  "$USER_HOME/tools/Check_server_information/gpu-cpu.sh" \
-  "$USER_HOME/Check_server_information/gpu-cpu.sh")
+  "$SCRIPT_DIR/gpu-cpu.sh")
 
 MAKECSV_SH=$(find_file make-csv.sh \
   "${LIB_DIR:-$SCRIPT_DIR/lib}/make-csv.sh" \
-  "$SCRIPT_DIR/make-csv.sh" \
-  "$USER_HOME/tools/Check_server_information/make-csv.sh" \
-  "$USER_HOME/Check_server_information/make-csv.sh")
+  "$SCRIPT_DIR/make-csv.sh")
 
+# gadget_burn 은 setup.sh 가 저장소 안(./gadget-burn)에 빌드한다.
+# 다른 곳에 빌드해 뒀다면 BURN_DIR=/경로 로 지정할 수 있다.
 GADGET_BURN=$(find_file gadget_burn \
   "${BURN_DIR:-$SCRIPT_DIR/gadget-burn}/gadget_burn" \
   "$SCRIPT_DIR/gadget-burn/gadget_burn" \
-  "$USER_HOME/tools/gadget-burn/gadget_burn" \
   "$(command -v gadget_burn 2>/dev/null)")
 
 MISSING=0
-[ -n "$GPUCPU_SH" ]   || { echo "[!] gpu-cpu.sh 를 찾을 수 없습니다 (lib/gpu-cpu.sh)"; MISSING=1; }
-[ -n "$MAKECSV_SH" ]  || { echo "[!] make-csv.sh 를 찾을 수 없습니다 (lib/make-csv.sh)"; MISSING=1; }
+[ -n "$GPUCPU_SH" ]   || { echo "[!] lib/gpu-cpu.sh 가 없습니다 — 저장소를 통째로 받았는지 확인하세요."; MISSING=1; }
+[ -n "$MAKECSV_SH" ]  || { echo "[!] lib/make-csv.sh 가 없습니다 — 저장소를 통째로 받았는지 확인하세요."; MISSING=1; }
 [ -n "$GADGET_BURN" ] || { echo "[!] gadget_burn 을 찾을 수 없습니다 → ./setup.sh 를 먼저 실행하세요."; MISSING=1; }
 command -v stress >/dev/null || { echo "[!] stress 가 없습니다 → ./setup.sh 를 먼저 실행하세요."; MISSING=1; }
 command -v nvidia-smi >/dev/null || { echo "[!] nvidia-smi 가 없습니다 (NVIDIA 드라이버 미설치)"; MISSING=1; }

@@ -1,5 +1,9 @@
 # setup.sh 가 받아오는 외부 저장소
 /gadget-burn/
+/deepgadget-log-grabber/
+/nccl-tests/
+/gpu-burn/
+/fio/
 
 # 실행 결과물 (실행한 디렉터리에 생성됨)
 inspect_*.log

@@ -2,18 +2,30 @@
 
 Manycoresoft / DEEPGadget **출고 검수** 스크립트 모음.
 
-하드웨어 점검과 서버 설정을 한 번에 하고(`inspect.sh`), 번인을 돌려
-검수확인서에 붙일 온도 CSV를 뽑는다(`run-burnin.sh`).
+출고 장비의 서버 설정을 적용하고(`setup.sh`), 하드웨어를 점검하고(`inspect.sh`),
+번인을 돌려 검수확인서에 붙일 온도 CSV를 뽑는다(`run-burnin.sh`).
 
 ```
 prodtech_inspection/
-├── setup.sh          # 번인에 필요한 것만 설치 (apt 패키지 + gadget-burn 빌드)
-├── inspect.sh        # 하드웨어 점검 + 서버 설정          ← 검수 본체
+├── setup.sh          # 서버 설정 + 도구 설치     ← 값을 바꾸는 건 여기뿐
+├── inspect.sh        # 검수 (읽기 전용)          ← 확인만, 아무것도 안 바꿈
 ├── run-burnin.sh     # GPU/CPU 동시 번인 + 온도 로깅 → CSV
 └── lib/
-    ├── gpu-cpu.sh    # 온도 로깅 (Check_server_information 유래)
+    ├── gpu-cpu.sh    # 온도 로깅
     └── make-csv.sh   # 온도 로그 → CSV
 ```
+
+구 `Check_server_information` 과 `setup_tools.sh` 를 대체한다. 이 저장소 하나면 된다.
+
+**역할 분담**
+
+| | setup.sh | inspect.sh |
+|---|---|---|
+| 서버 설정 | **적용한다** | 걸려 있는지 **확인만** |
+| 도구 설치·빌드 | 한다 | 안 한다 |
+| 실행 횟수 | 장비당 1회 (설정 바뀔 때 재실행) | 몇 번이든 |
+
+`inspect.sh` 에서 ❌ 가 나오면 대부분 `./setup.sh` 를 (다시) 돌리면 된다.
 
 ## 빠른 시작
 
@@ -21,8 +33,8 @@ prodtech_inspection/
 git clone https://github.com/DEEPGadget/prodtech_inspection.git
 cd prodtech_inspection
 
-./setup.sh          # 1회만. 번인 도구 설치 (make 로그가 길다)
-./inspect.sh        # 하드웨어 점검 + 서버 설정
+./setup.sh          # 1회. 서버 설정 + 도구 설치 (make 로그가 길다)
+./inspect.sh        # 검수 — 읽기 전용
 ./run-burnin.sh     # 1시간 번인 → CSV
 ```
 
@@ -33,35 +45,54 @@ cd prodtech_inspection
 
 ## setup.sh
 
-번인 실행에 꼭 필요한 것만 설치한다.
-
-| 항목 | 내용 |
-|---|---|
-| apt 패키지 | `stress` `lm-sensors` `nvme-cli` `ipmitool` `pciutils` `ifupdown-extra` `build-essential` `git` |
-| gadget-burn | `DEEPGadget/gadget-burn` clone + make (CUDA 필요) |
+**설정을 바꾸는 것은 이 스크립트뿐이다.**
 
 ```bash
-./setup.sh              # 저장소 안(./gadget-burn)에 설치
-./setup.sh /opt/bench   # 다른 경로에 gadget-burn 설치
+./setup.sh                    # 설정 + 번인 최소 도구
+./setup.sh --full             # + 벤치마크/진단 도구 전부
+./setup.sh --full /opt/bench  # 외부 저장소를 다른 경로에 설치
 ```
 
-> **검수와 분리한 이유**: `make` 출력이 수백 줄이라 검수와 같이 돌리면
-> 하드웨어 점검·서버 설정 결과가 로그에서 묻힌다. 설치는 장비당 한 번,
-> 검수는 여러 번 돌린다.
+**PART A — 서버 설정**
 
-로그: `setup_<host>_<시각>.log`
+| 항목 | 하는 일 |
+|---|---|
+| 자동 업데이트 차단 | `apt-daily.timer` `apt-daily-upgrade.timer` `unattended-upgrades.service` → stop + disable + mask |
+| 전원관리 | sleep/suspend/hibernate mask + performance 프로파일 |
+| Time Zone | `Asia/Seoul` (`TZ_WANT` 로 변경 가능) |
+| NVIDIA Persistence Mode | `nvidia-pm.service` 생성 → `enable --now` (재부팅 후 유지) |
+| OS ACS Disable | `/usr/local/sbin/disable_acs.sh` + `disable-acs.service` → `enable --now` |
+| /etc/default/grub | `iommu=pt` `pcie_aspm=off` **점검·안내만** (자동 편집 안 함) |
+
+> **자동 업데이트 차단이 맨 앞에 있는 이유**: `apt-daily.timer` 가 깨어나
+> `/var/lib/dpkg/lock` 을 잡으면 아래 패키지 설치가 `Could not get lock` 으로 막힌다.
+
+**PART B — 도구 설치**
+
+| | 기본 | `--full` |
+|---|---|---|
+| apt 패키지 | ✓ `stress` `lm-sensors` `nvme-cli` `ipmitool` `pciutils` `usbutils` `dmidecode` `ifupdown-extra` `infiniband-diags` `build-essential` `git` | ✓ |
+| gadget-burn | ✓ clone + make (번인 필수, CUDA 필요) | ✓ |
+| deepgadget-log-grabber | — | ✓ clone |
+| nccl-tests | — | ✓ clone + make (NCCL 필요) |
+| gpu-burn | — | ✓ clone + make |
+| fio | — | ✓ clone + build + install |
+
+로그: `setup_<host>_<시각>.log` — make 출력이 길어도 맨 끝 요약에 항목별 성공/실패가 모인다.
 
 ---
 
 ## inspect.sh
 
-`Check_server_information/test.sh` 의 하드웨어 리스트와 `setup_tools.sh` 의
-서버 설정을 하나로 합친 것. 빌드는 포함하지 않는다.
+하드웨어 점검과 서버 설정을 한 번에 한다. 빌드는 포함하지 않는다.
 
 ```bash
-./inspect.sh            # 점검 + 설정 적용
-./inspect.sh --check    # 아무것도 바꾸지 않고 점검만 (재검수용)
+./inspect.sh
 ```
+
+아무것도 바꾸지 않는다. 하드웨어를 조사하고, `setup.sh` 가 적용해 둔 설정이
+실제로 걸려 있는지 확인해 합격/불합격만 보고한다.
+(`--check` 는 예전 옵션 — 받아만 주고 무시한다.)
 
 **PART 1 — 하드웨어 점검 (읽기 전용)**
 
@@ -79,23 +110,25 @@ cd prodtech_inspection
 | USB 포트 상태 | Bus 별 장치 수 |
 | PSU 상태 | PSU 인식 수 / Power In·Out / 온도 / Fan RPM |
 
-**PART 2 — 서버 설정 (`--check` 면 확인만)**
+**PART 2 — 서버 설정 확인 (읽기 전용)**
 
-| 항목 | 조치 |
+`setup.sh` 가 적용한 것이 걸려 있는지만 본다. ❌ 가 나오면 `./setup.sh` 를 다시 돌린다.
+
+| 항목 | 확인 내용 |
 |---|---|
-| Time Zone | `Asia/Seoul` 로 설정 (`TZ_WANT` 로 변경 가능) |
-| 전원관리 서비스 비활성화 | sleep/suspend/hibernate mask + performance 프로파일 |
-| 자동 업데이트 중지 | `apt-daily.timer` `apt-daily-upgrade.timer` `unattended-upgrades` mask |
-| NVIDIA Persistence Mode | `nvidia-pm.service` 등록 (재부팅 후 유지) |
-| OS ACS Disable | `disable-acs.service` 등록 + `ACSCtl SrcValid+` 0개 확인 |
-| /etc/default/grub | `iommu=pt` `pcie_aspm=off` **점검·안내만** (자동 편집 안 함) |
+| Time Zone | `Asia/Seoul` 인지 + NTP 동기화 |
+| 전원관리 | sleep/suspend/hibernate 가 masked 인지 + 프로파일이 performance 인지 |
+| 자동 업데이트 중지 | 타이머 3종이 masked 인지 |
+| NVIDIA Persistence Mode | Enabled 인지 + `nvidia-pm.service` 가 enabled 인지 |
+| OS ACS Disable | `ACSCtl SrcValid+` 가 0개인지 + `disable-acs.service` 가 enabled 인지 |
+| /etc/default/grub | `iommu=pt` `pcie_aspm=off` 가 현재 부팅에 반영됐는지 |
 
 마지막에 정상 / 확인 필요 / 건너뜀 으로 요약이 나오고,
 확인 필요 항목이 하나라도 있으면 exit code 1 로 끝난다.
 
 로그: `inspect_<host>_<시각>.log`
 
-> BIOS 설정과 Gadgetini 그래프 확인은 이 스크립트 범위 밖이라 빠져 있다.
+> BIOS 설정과 Gadgetini 그래프 확인은 범위 밖이다.
 > GRUB 항목에서 BIOS 에서 확인할 값(VT-d / ACS Control)을 안내만 한다.
 
 ---
@@ -162,9 +195,9 @@ deepgadget_20260908_143000/
 ## 검수 순서
 
 ```bash
-./setup.sh          # 1) 번인 도구 설치 (장비당 1회)
-./inspect.sh        # 2) 하드웨어 점검 + 서버 설정  → inspect_*.log
-                    #    GRUB 안내가 나오면 편집 + update-grub + reboot 후 재실행
-./inspect.sh --check   #    재부팅 후 재확인
+./setup.sh          # 1) 서버 설정 + 도구 설치 (장비당 1회)
+                    #    GRUB 안내가 나오면 편집 + update-grub + reboot
+./inspect.sh        # 2) 검수 → inspect_*.log
+                    #    ❌ 가 있으면 조치 후 다시 ./inspect.sh
 ./run-burnin.sh     # 3) 1시간 번인 → CSV 를 검수확인서에 첨부
 ```
