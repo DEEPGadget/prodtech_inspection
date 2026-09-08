@@ -1,8 +1,8 @@
 # prodtech_inspection
 
-Manycoresoft / DEEPGadget **출고 검수** 스크립트 모음.
+Manycoresoft / DEEPGadget **SW 검수** 스크립트 모음.
 
-출고 장비의 서버 설정을 적용하고(`setup.sh`), 하드웨어를 점검하고(`inspect.sh`),
+검수 대상 장비의 서버 설정을 적용하고(`setup.sh`), 하드웨어를 점검하고(`inspect.sh`),
 번인을 돌려 검수확인서에 붙일 온도 CSV를 뽑는다(`run-burnin.sh`).
 
 ```
@@ -106,6 +106,9 @@ inspect_<host>_<시각>/
                     lsblk -O, sensors, ip -d addr, lsusb -t, nvme list, dmesg 발췌
 ```
 
+부하에 쓰는 것은 **`gadget-burn`** 이다(`setup.sh` 가 `./gadget-burn/` 에 빌드해 둔 것).
+구 `test.sh` 가 쓰던 `gpu-burn` 이 아니다.
+
 ### PCIe 측정 전에 GPU 부하를 거는 이유
 
 NVIDIA GPU 는 유휴일 때 링크를 Gen1 으로 내린다. 그 상태로 읽으면 멀쩡한 카드가
@@ -128,7 +131,7 @@ NVIDIA GPU 는 유휴일 때 링크를 Gen1 으로 내린다. 그 상태로 읽�
 | CPU | `dmidecode -t processor` Serial Number | 대부분 `Unknown` → CPUID 로 대체 |
 | DIMM | `dmidecode -t memory` Serial Number | Bank Locator(슬롯)별 |
 | Storage | `lsblk SERIAL` | SATA/NVMe 공통 |
-| GPU | `nvidia-smi --query-gpu=serial` | VBIOS 함께 기록 |
+| GPU | `nvidia-smi --query-gpu=serial`, 없으면 GPU UUID | GeForce(3090/4090/5090 등)는 보드 S/N 이 없어 `N/A` → UUID 로 대체. VBIOS·BDF 함께 기록 |
 | NIC | PCIe Device Serial Number, 없으면 고정 MAC(`ethtool -P`) | DSN 은 카드 단위라 듀얼포트면 두 포트가 같은 값 |
 | IB/HCA | `/sys/class/infiniband/*/node_guid` | board_id·fw 함께 기록 |
 | RAID | storcli/perccli `show all`, 없으면 PCIe DSN | 관리도구 없으면 불합격 처리 |
@@ -192,7 +195,7 @@ GPU 번인, CPU 번인, 온도 로깅 **3개를 동시에** 돌리고 CSV까지 
 않으므로 GPU 가 10장이어도 화면이 흐르지 않는다.
 
 ```
- DEEPGadget 검수 번인 · deepgadget   경과 00:12:35 / 01:00:00   남은시간 00:47:25
+ DEEPGadget SW 검수 번인 · deepgadget   경과 00:12:35 / 01:00:00   남은시간 00:47:25
  █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 21%
 ────────────────────────────────────────────────────────────────────────────────
  GPU   TEMP   MAX  SLOWDN        POWER W   CLK MHz   UTIL  THROTTLE

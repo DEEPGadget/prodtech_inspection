@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# inspect.sh — DEEPGadget 출고 검수 (읽기 전용)
+# inspect.sh — DEEPGadget SW 검수 (읽기 전용)
 #
 #   구 Check_server_information/test.sh (HW 리스트) 와 구 setup_tools.sh
 #   (서버 설정) 를 대체한다. 이 저장소 하나로 검수가 끝난다.
@@ -72,7 +72,7 @@ add_sn() { SERIALS+=("$1|$2|$3|${4:-}"); }
 sn_clean() {
     local v="${1//$'\t'/ }"; v="$(echo "$v" | sed 's/^ *//;s/ *$//')"
     case "$v" in
-        ""|Unknown|unknown|"Not Specified"|"To Be Filled By O.E.M."|"Default string"|        "System Serial Number"|"None"|0|"0000000000") echo "-" ;;
+        ""|Unknown|unknown|"Not Specified"|"To Be Filled By O.E.M."|"Default string"|"System Serial Number"|"None"|0|"0000000000"|"N/A"|"[N/A]"|"Not Supported"|"[Not Supported]"|"Not Available"|"[Unknown Error]") echo "-" ;;
         *) echo "$v" ;;
     esac
 }
@@ -80,7 +80,7 @@ sn_clean() {
 printf '\033[1;36m'
 cat <<'BANNER'
 ================================================================================
-   Manycoresoft / DEEPGadget  —  출고 검수 (Production Inspection)
+   Manycoresoft / DEEPGadget  —  SW 검수 (Software Inspection)
 ================================================================================
 BANNER
 printf '\033[0m'
@@ -239,17 +239,32 @@ if have nvidia-smi; then
     kv "Driver"  "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
     kv "CUDA"    "$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9.]+' | head -1)"
     kv "GPU 수"  "${GPU_N} EA"
-    printf '\n   %-4s %-46s %-16s %-16s %s\n' "IDX" "NAME" "VBIOS" "S/N" "MEMORY"
-    while IFS=',' read -r i n v sn m; do
+    printf '\n   %-4s %-42s %-16s %-11s %-10s %s\n' "IDX" "NAME" "VBIOS" "MEMORY" "S/N출처" "S/N (없으면 UUID)"
+    GPU_NOSN=0
+    while IFS=',' read -r i n v sn uuid bus m; do
         [[ -z "$i" ]] && continue
-        i=${i// /}; sn=$(sn_clean "$sn")
-        printf '   %-4s %-46s %-16s %-16s %s\n' "$i" "${n# }" "${v// /}" "$sn" "${m# }"
-        add_sn "GPU" "GPU${i} ${n# }" "$sn" "VBIOS ${v// /}"
-    done < <(nvidia-smi --query-gpu=index,name,vbios_version,serial,memory.total --format=csv,noheader)
+        i=${i// /}; sn=$(sn_clean "$sn"); uuid=$(echo "$uuid" | tr -d ' '); bus=$(echo "$bus" | tr -d ' ')
+        # GeForce(3090/4090/5090 등) 소비자용 카드는 InfoROM 에 보드 S/N 이 없어
+        # nvidia-smi 가 N/A 를 낸다. 그럴 땐 GPU UUID 를 고유 식별자로 쓴다.
+        if [[ "$sn" == "-" ]]; then
+            ident="$uuid"; src="UUID"; GPU_NOSN=$((GPU_NOSN+1))
+            note="VBIOS ${v// /} / ${bus} / 보드 S/N 미제공(소비자용 카드) → UUID"
+        else
+            ident="$sn"; src="보드S/N"
+            note="VBIOS ${v// /} / ${bus}"
+        fi
+        printf '   %-4s %-42s %-16s %-11s %-10s %s\n' "$i" "$(echo "${n# }" | cut -c1-42)" "${v// /}" "${m# }" "$src" "$ident"
+        add_sn "GPU" "GPU${i} ${n# }" "$ident" "$note"
+    done < <(nvidia-smi --query-gpu=index,name,vbios_version,serial,uuid,pci.bus_id,memory.total --format=csv,noheader)
+    if [[ "$GPU_NOSN" -gt 0 ]]; then
+        printf '   ※ %d장은 보드 S/N 이 없는 소비자용 카드입니다(GeForce 계열). UUID 를 식별자로 기록했습니다.\n' "$GPU_NOSN"
+    fi
     ECC=$(nvidia-smi --query-gpu=ecc.errors.uncorrected.volatile.total --format=csv,noheader 2>/dev/null | tr -d ' ' | grep -v '^\[N/A\]$' | awk '{s+=$1} END{print s+0}')
     kv "ECC uncorrected" "${ECC:-N/A}"
     if [[ "$GPU_N" -gt 0 ]]; then
-        record OK "GPU" "$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) × ${GPU_N}"
+        gpu_note=""
+        [[ "$GPU_NOSN" -gt 0 ]] && gpu_note=" / ${GPU_NOSN}장은 보드 S/N 미제공 → UUID 기록"
+        record OK "GPU" "$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) × ${GPU_N}${gpu_note}"
     else
         record FAIL "GPU" "nvidia-smi 는 있으나 GPU 가 0개"
     fi
@@ -531,7 +546,7 @@ else
         record OK "구성품 S/N" "${#SERIALS[@]}개 전부 수집 — serials.csv"
     else
         # CPU S/N 처럼 하드웨어가 아예 안 내놓는 값도 있어 실패로 보지 않는다.
-        record OK "구성품 S/N" "${#SERIALS[@]}개 중 ${SN_MISS}개는 S/N 미제공(하드웨어가 노출 안 함) — serials.csv"
+        record OK "구성품 S/N" "${#SERIALS[@]}개 중 ${SN_MISS}개는 하드웨어가 S/N 을 노출하지 않음 — serials.csv"
     fi
 fi
 
@@ -696,7 +711,7 @@ print_group() {
     return "$count"
 }
 
-printf '\n\033[1;34m'; hr; printf '  검수 결과 요약  —  %s\n' "$(hostname)"; hr; printf '\033[0m'
+printf '\n\033[1;34m'; hr; printf '  SW 검수 결과 요약  —  %s\n' "$(hostname)"; hr; printf '\033[0m'
 print_group OK   "✅ 정상"      32 || OK_COUNT=$?
 print_group FAIL "❌ 확인 필요" 31 || FAIL_COUNT=$?
 print_group SKIP "⚠️  건너뜀"   33 || SKIP_COUNT=$?

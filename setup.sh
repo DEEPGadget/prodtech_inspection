@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# setup.sh — 출고 장비 서버 설정 + 검수 도구 설치
+# setup.sh — SW 검수용 서버 설정 + 도구 설치
 #
 #   PART A. 서버 설정 (실제로 값을 바꾸는 쪽)
 #     자동 업데이트 차단 / 전원관리 / Time Zone /
@@ -74,7 +74,7 @@ clone_repo() {   # clone_repo <url> <name>
 }
 
 printf '\033[1;36m'
-hr; printf '  DEEPGadget 출고 설정 + 도구 설치  —  %s\n' "$(hostname)"; hr
+hr; printf '  DEEPGadget SW 검수 · 설정 + 도구 설치  —  %s\n' "$(hostname)"; hr
 printf '\033[0m'
 printf '   설치 경로 : %s\n' "$BASE_DIR"
 printf '   모드      : %s\n' "$([ "$FULL" -eq 1 ] && echo '--full (벤치마크 도구 포함)' || echo '기본 (번인 최소 구성)')"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# run-burnin.sh — DEEPGadget 출고 검수 번인 통합 실행 스크립트
+# run-burnin.sh — DEEPGadget SW 검수 번인 통합 실행 스크립트
 #
 #   1) gadget-burn/gadget_burn                                   (GPU 번인)
 #   2) stress -c <코어수>                                         (CPU 번인)
@@ -99,7 +99,7 @@ gt()  { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0>b+0)}'; }   # a > b 이면 tru
 RULE="────────────────────────────────────────────────────────────────────────────────"
 
 echo "$RULE"
-echo " ${C_C}DEEPGadget 검수 번인${C_RST}  —  $HOSTN"
+echo " ${C_C}DEEPGadget SW 검수 번인${C_RST}  —  $HOSTN"
 echo "   지속시간 : $DUR 초 ($(hms "$DUR"))     로그 샘플간격 : ${INTERVAL}s"
 echo "   CPU      : ${NCPU} threads   (stress -c $NCPU -t $DUR)"
 echo "   GPU      : ${GPUNAME} x${GPUCNT}   (gadget_burn -t $DUR)"
@@ -245,7 +245,7 @@ render() {
 
   if [ "$slim" = 0 ]; then
     FRAME+=("$RULE")
-    FRAME+=(" ${C_C}DEEPGadget 검수 번인${C_RST} · ${C_B}${HOSTN}${C_RST}   경과 $(hms "$el") / $(hms "$DUR")   남은시간 $(hms "$rem")")
+    FRAME+=(" ${C_C}DEEPGadget SW 검수 번인${C_RST} · ${C_B}${HOSTN}${C_RST}   경과 $(hms "$el") / $(hms "$DUR")   남은시간 $(hms "$rem")")
     FRAME+=(" $(bar "$pct" 46) ${pct}%")
     FRAME+=("$RULE")
   else
