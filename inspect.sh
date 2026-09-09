@@ -673,6 +673,42 @@ for u in "${AUTOUPD_UNITS[@]}"; do
 done
 printf '   해제하려면: sudo systemctl unmask %s\n' "${AUTOUPD_UNITS[*]}"
 
+# 유닛 mask 와 별개로 APT::Periodic 설정도 확인한다. 판정은 반드시 apt-config dump 로
+# 한다 — 키 이름이 틀리면(APTPeriodic:: 등) 파일에는 써 있는데 apt 는 무시하므로
+# 파일을 cat 해서는 잡히지 않는다.
+APT_CONF=/etc/apt/apt.conf.d/99-disable-auto-upgrades
+APT_DUMP=$(apt-config dump 2>/dev/null)
+for k in Enable Update-Package-Lists Download-Upgradeable-Packages Unattended-Upgrade; do
+    v=$(printf '%s\n' "$APT_DUMP" | sed -n "s/^APT::Periodic::${k} \"\\(.*\\)\";\$/\\1/p" | tail -1)
+    # kv 의 %-22s 로는 Download-Upgradeable-Packages 가 넘쳐 정렬이 깨진다.
+    printf '   %-44s %s\n' "APT::Periodic::$k" "${v:-미설정}"
+done
+if [[ "$APT_DUMP" == *'APT::Periodic::Enable "0"'* ]]; then
+    record OK "자동업데이트: APT::Periodic" "Enable=0 — apt 정기작업 비활성"
+else
+    err "APT::Periodic::Enable 이 0 이 아님 → ./setup.sh"
+    record FAIL "자동업데이트: APT::Periodic" "Enable≠0 — ./setup.sh 실행 필요 ($APT_CONF)"
+fi
+[[ -f "$APT_CONF" ]] && kv "설정 파일" "$APT_CONF" || kv "설정 파일" "없음 (배포판 기본값 사용 중)"
+
+# snap 은 snapd 자체 타이머로 갱신되므로 apt 설정과 무관하게 따로 확인한다.
+if have snap; then
+    SNAP_TIME=$(snap refresh --time 2>/dev/null)
+    SNAP_HOLD=$(printf '%s\n' "$SNAP_TIME" | sed -n 's/^hold: *//p' | tail -1)
+    SNAP_N=$(snap list 2>/dev/null | tail -n +2 | wc -l)
+    kv "snap 갱신 보류" "${SNAP_HOLD:-없음}"
+    kv "설치된 snap" "${SNAP_N}개"
+    if [[ "$SNAP_HOLD" == *forever* ]]; then
+        record OK "자동업데이트: snap" "hold: forever (${SNAP_N}개)"
+    else
+        err "snap 자동 갱신이 살아 있음 → ./setup.sh"
+        record FAIL "자동업데이트: snap" "hold=${SNAP_HOLD:-없음} — ./setup.sh 실행 필요"
+    fi
+    printf '   해제하려면: sudo snap refresh --unhold\n'
+else
+    record SKIP "자동업데이트: snap" "snapd 없음 — 해당 없음"
+fi
+
 # ---------------------------------------------------------------- Persistence Mode
 title "NVIDIA Persistence Mode"
 if have nvidia-smi; then

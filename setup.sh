@@ -122,6 +122,53 @@ done
 sudo systemctl daemon-reload
 printf '   해제하려면: sudo systemctl unmask %s\n' "${AUTOUPD_UNITS[*]}"
 
+# APT::Periodic 설정으로 이중 차단.
+# mask 는 타이머가 깨어나는 것을 막고, 이 설정은 어떤 경로로든 apt.systemd.daily 가
+# 실행됐을 때 맨 앞(APT::Periodic::Enable 검사)에서 즉시 exit 시킨다.
+# 파일명이 99- 인 이유: apt 는 apt.conf.d 를 파일명 오름차순으로 읽어 뒤쪽이 이기고,
+# 배포판이 관리하는 20auto-upgrades / 10periodic 은 패키지 업데이트 때 되돌아갈 수 있다.
+APT_CONF=/etc/apt/apt.conf.d/99-disable-auto-upgrades
+log "자동 업데이트 차단: APT::Periodic 설정 (${APT_CONF##*/})"
+sudo tee "$APT_CONF" >/dev/null <<'EOF'
+// DEEPGadget 출고 검수 — 자동 업데이트 차단 (setup.sh 가 생성)
+// 해제하려면 이 파일을 지우고 systemctl unmask 할 것.
+APT::Periodic::Enable "0";
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::Unattended-Upgrade "0";
+APT::Periodic::AutocleanInterval "0";
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+sudo chmod 644 "$APT_CONF"
+# 검증은 파일 내용이 아니라 apt-config dump 로 한다. 키 이름을 한 글자라도 틀리면
+# (사내 문서에 돌던 APTPeriodic:: 처럼) apt 가 조용히 무시해서 파일만 멀쩡해 보인다.
+APT_DUMP=$(apt-config dump 2>/dev/null)
+if [[ "$APT_DUMP" == *'APT::Periodic::Enable "0"'* ]]; then
+    ok "APT::Periodic::Enable=0 (apt 정기작업 비활성)"
+    record OK "자동업데이트: APT::Periodic" "Enable=0 — $APT_CONF"
+else
+    err "APT::Periodic::Enable 이 0 으로 안 잡힘"
+    record FAIL "자동업데이트: APT::Periodic" "apt-config dump 에 Enable=0 없음 — $APT_CONF 확인"
+fi
+
+# snap 은 snapd 자체 타이머(기본 하루 4회)로 갱신되며 APT::Periodic 과 완전히 무관하다.
+# 데스크톱 이미지로 설치된 장비는 mesa/gnome 스냅이 출고 후 조용히 바뀔 수 있어 보류한다.
+if have snap; then
+    log "자동 업데이트 차단: snap 갱신 보류"
+    sudo snap refresh --hold >/dev/null 2>&1 || true
+    SNAP_TIME=$(snap refresh --time 2>/dev/null)
+    if [[ "$SNAP_TIME" == *"hold:"*"forever"* ]]; then
+        ok "snap 자동 갱신 보류됨 (hold: forever)"
+        record OK "자동업데이트: snap" "hold: forever"
+    else
+        err "snap 갱신 보류 실패"
+        record FAIL "자동업데이트: snap" "hold 미적용 — snap refresh --time 확인"
+    fi
+    printf '   해제하려면: sudo snap refresh --unhold\n'
+else
+    record SKIP "자동업데이트: snap" "snapd 없음 — 해당 없음"
+fi
+
 # ---------------------------------------------------------------- 전원관리
 log "전원관리: sleep/suspend/hibernate 차단 + performance 프로파일"
 SLEEP_TARGETS=(sleep.target suspend.target hibernate.target hybrid-sleep.target)

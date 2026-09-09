@@ -60,7 +60,7 @@ cd prodtech_inspection
 
 | 항목 | 하는 일 |
 |---|---|
-| 자동 업데이트 차단 | `apt-daily.timer` `apt-daily-upgrade.timer` `unattended-upgrades.service` → stop + disable + mask |
+| 자동 업데이트 차단 | ① `apt-daily.timer` `apt-daily-upgrade.timer` `unattended-upgrades.service` → stop + disable + mask<br>② `/etc/apt/apt.conf.d/99-disable-auto-upgrades` 에 `APT::Periodic::*` 를 `0` 으로 고정<br>③ `snap refresh --hold` (snapd 가 있을 때) |
 | 전원관리 | sleep/suspend/hibernate mask + performance 프로파일 |
 | Time Zone | `Asia/Seoul` (`TZ_WANT` 로 변경 가능) |
 | NVIDIA Persistence Mode | `nvidia-pm.service` 생성 → `enable --now` (재부팅 후 유지) |
@@ -69,6 +69,18 @@ cd prodtech_inspection
 
 > **자동 업데이트 차단이 맨 앞에 있는 이유**: `apt-daily.timer` 가 깨어나
 > `/var/lib/dpkg/lock` 을 잡으면 아래 패키지 설치가 `Could not get lock` 으로 막힌다.
+
+> **왜 세 겹인가**: mask 는 타이머가 깨어나는 것을 막고, `APT::Periodic::Enable "0"` 은
+> 어떤 경로로든 `/usr/lib/apt/apt.systemd.daily` 가 실행됐을 때 맨 앞에서 즉시 exit 시킨다.
+> snap 은 `snapd` 자체 타이머(기본 하루 4회)로 돌아 APT 설정과 완전히 무관하므로 따로 막는다.
+>
+> 설정 파일을 `99-` 로 두는 이유는 apt 가 `apt.conf.d` 를 파일명 오름차순으로 읽어 뒤쪽이
+> 이기기 때문이다. 배포판이 관리하는 `20auto-upgrades` / `10periodic` 을 고치면 패키지
+> 업데이트 때 되돌아갈 수 있다.
+>
+> **키 이름 주의**: 실제 키는 `APT::Periodic::` 이다. 사내 문서에 돌던 `APTPeriodic::` 처럼
+> 쓰면 apt 가 조용히 무시해서 파일은 멀쩡한데 자동 업데이트는 계속 돈다. 그래서 setup.sh 도
+> inspect.sh 도 파일 내용이 아니라 `apt-config dump` 출력으로 판정한다.
 
 **PART B — 도구 설치**
 
@@ -200,7 +212,7 @@ CPU 소켓(`SP6`)이 들어가 어느 자리의 부품인지 바로 짚을 수 �
 |---|---|
 | Time Zone | `Asia/Seoul` 인지 + NTP 동기화 |
 | 전원관리 | sleep/suspend/hibernate 가 masked 인지 + 프로파일이 performance 인지 |
-| 자동 업데이트 중지 | 타이머 3종이 masked 인지 |
+| 자동 업데이트 중지 | 타이머 3종이 masked 인지 + `apt-config dump` 의 `APT::Periodic::Enable` 이 `0` 인지 + snap 이 `hold: forever` 인지 |
 | NVIDIA Persistence Mode | Enabled 인지 + `nvidia-pm.service` 가 enabled 인지 |
 | OS ACS Disable | `ACSCtl SrcValid+` 가 0개인지 + `disable-acs.service` 가 enabled 인지 |
 | /etc/default/grub | `iommu=pt` `pcie_aspm=off` 가 현재 부팅에 반영됐는지 |
