@@ -29,6 +29,18 @@ prodtech_inspection/
 
 `inspect.sh` 에서 ❌ 가 나오면 대부분 `./setup.sh` 를 (다시) 돌리면 된다.
 
+## 전제 조건
+
+| | 필요한 것 |
+|---|---|
+| OS | Ubuntu/Debian 계열 (`apt-get`, `systemd` 를 쓴다) |
+| 권한 | `sudo` 가 되는 **일반 계정** (root 로 직접 실행하면 거부한다) |
+| 네트워크 | `setup.sh` 가 apt + GitHub 에서 받아온다 (오프라인이면 PART B 가 실패) |
+| GPU | NVIDIA 드라이버(`nvidia-smi`) + CUDA 툴킷 — `gadget-burn` 빌드에 필요 |
+
+CUDA 가 없으면 `setup.sh` 는 `gadget-burn` 을 clone 까지만 하고 ⚠️ 로 남긴다.
+드라이버·툴킷을 깐 뒤 `./setup.sh` 를 다시 돌리면 그때 빌드된다.
+
 ## 빠른 시작
 
 ```bash
@@ -41,8 +53,18 @@ cd prodtech_inspection
 ./run-burnin.sh     # 1시간 번인 → CSV
 ```
 
-세 스크립트 모두 **일반 계정으로** 실행한다. 필요할 때만 내부에서 `sudo` 를 쓴다.
-결과 파일은 전부 **실행한 디렉터리**에 생긴다.
+전부 **일반 계정으로** 실행한다. `setup.sh` 와 `inspect.sh` 는 root 로 실행하면 아예
+거부하고, 필요할 때만 내부에서 `sudo` 를 쓴다. 예외는 `run-burnin.sh` 하나로,
+NVMe 온도(`nvme smart-log`)를 읽어야 해서 **스스로 `sudo` 로 재실행**한다
+(→ [알아둘 것](#알아둘-것)).
+
+결과 파일은 전부 **실행한 디렉터리**에 생긴다. 저장소를 더럽히지 않으려면
+결과를 모을 폴더에서 스크립트를 절대경로로 부르면 된다.
+
+```bash
+mkdir -p ~/검수/DG-2026-001 && cd ~/검수/DG-2026-001
+~/prodtech_inspection/inspect.sh
+```
 
 ---
 
@@ -107,6 +129,7 @@ GPU/CPU 가 부하를 받는지만 짧게 본다.
 ./functest.sh --mem        # + 메모리 부하 (전체 RAM 의 80%)
 ./functest.sh --mem 30%    # 부하량 지정 (% 또는 4G / 512M)
 ./functest.sh --time 600   # 번인 시간(초)
+./functest.sh --interval 2 # 온도 샘플 간격(초, 기본 5)
 ./functest.sh --no-hw      # 번인만
 ```
 
@@ -134,6 +157,7 @@ functest_<host>_<시각>/
 ./inspect.sh                 # PCIe 측정 시 GPU 부하를 걸어 링크를 최대 속도로 올림
 ./inspect.sh --no-load       # 부하 없이
 ./inspect.sh --load-sec 120  # 부하 시간 (기본 60초)
+./inspect.sh --hw-only       # PART 1(하드웨어)만 — functest.sh 가 쓰는 모드
 ```
 
 아무것도 바꾸지 않는다. 하드웨어를 조사하고, `setup.sh` 가 적용해 둔 설정이
@@ -306,3 +330,60 @@ GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_Throttle
                     #    ❌ 가 있으면 조치 후 다시 ./inspect.sh
 ./run-burnin.sh     # 4) 1시간 번인 → CSV 를 검수확인서에 첨부
 ```
+
+`run-burnin.sh` 는 `functest.sh` 가 5분짜리로 부르는 것과 같은 스크립트다.
+1시간 번인은 검수확인서에 붙일 CSV 를 뽑는 단계이므로 따로 한 번 더 돌린다.
+
+---
+
+## 환경변수
+
+옵션으로 노출하지 않은 값들. 평소에는 건드릴 일이 없다.
+
+| 변수 | 쓰는 곳 | 기본값 | 용도 |
+|---|---|---|---|
+| `TZ_WANT` | setup / inspect | `Asia/Seoul` | 적용·판정할 타임존 |
+| `CUDA_HOME` | setup | `/usr/local/cuda` | CUDA 를 다른 곳에 깐 경우 |
+| `PCIE_LOAD_SEC` | inspect | `60` | `--load-sec` 와 같음 |
+| `OUTDIR` | inspect | `inspect_<host>_<시각>` | 결과 폴더 지정 (`functest.sh` 가 쓴다) |
+| `OUT_ROOT` | run-burnin | 실행한 디렉터리 | `burnin_*` 를 만들 상위 경로 |
+| `BURN_DIR` | run-burnin | `<저장소>/gadget-burn` | `gadget_burn` 을 다른 곳에 빌드해 둔 경우 |
+| `LIB_DIR` | run-burnin | `<저장소>/lib` | `sample-sensors.sh` 위치 |
+| `REFRESH` | run-burnin | `2` | 대시보드 갱신 주기(초) |
+
+`run-burnin.sh` 는 `exec sudo` 로 자기를 재실행하므로 환경변수가 그대로 넘어가지
+않는다. 넘기려면 `sudo OUT_ROOT=/data ./run-burnin.sh` 처럼 sudo 에 직접 주거나,
+`cd` 로 위치를 잡고 실행한다(`functest.sh` 가 쓰는 방법).
+
+## 종료 코드
+
+| | 0 | 1 |
+|---|---|---|
+| setup.sh | 실패 항목 없음 | 실패(❌) 항목이 있거나, 실행 자체가 막힘(root 실행 / sudo 실패) |
+| inspect.sh | ❌ 없음 | **확인 필요(❌) 항목이 하나라도 있음** |
+| functest.sh | HW·번인 모두 정상 | HW 판정 ❌ 또는 번인 실패 |
+| run-burnin.sh | CSV 생성 완료 | 필수 도구 없음 / CSV 미생성 |
+
+⚠️(건너뜀)은 실패로 세지 않는다 — 해당 하드웨어가 없거나 도구가 없어 판정을
+못 한 경우다. 여러 대를 자동으로 돌릴 때는 exit code 로 걸러 쓸 수 있다.
+
+```bash
+./inspect.sh || echo "$(hostname) 확인 필요"
+```
+
+GRUB 안내는 exit code 에 반영되지 않는다. `setup.sh` 요약 뒤에 노란 박스가 뜨면
+편집 → `update-grub` → 재부팅이 남아 있다는 뜻이므로 눈으로 확인해야 한다.
+
+## 문제 해결
+
+| 증상 | 원인 / 조치 |
+|---|---|
+| `root 로 실행하지 마세요` | `setup.sh` `inspect.sh` 는 일반 계정 전용. `sudo` 를 빼고 다시 |
+| `gadget_burn 을 찾을 수 없습니다` | `./setup.sh` 미실행 또는 CUDA 없이 실행됨. CUDA 설치 후 `./setup.sh` 재실행 |
+| `Could not get lock /var/lib/dpkg/lock` | 자동 업데이트 타이머가 먼저 깨어난 것. `./setup.sh` 를 다시 돌리면 맨 앞에서 차단하고 진행한다 |
+| GPU 가 `Speed 2.5GT/s (downgraded)` | 유휴 상태로 읽힌 것. `--no-load` 를 뺐는지 확인 (기본은 부하를 건다) |
+| 온보드 NIC 이 `Width x4` 로 ❌ | 설계상 x4 인 보드가 많다(예: MS73-HB2 의 BCM57416). 슬롯 카드가 아니면 상위 브리지의 `LnkSta` 를 보고 판단한다 |
+| GRUB 항목만 계속 ❌ | `setup.sh` 는 grub 을 자동 편집하지 않는다. 안내대로 편집 → `sudo update-grub` → **재부팅** |
+| `ipmitool` 없음 → PSU ⚠️ | `./setup.sh` 로 설치. 건너뜀이라 검수는 계속된다 |
+| PSU 센서 값이 `na` → ❌ | 해당 PSU 의 **AC 케이블이 빠진 것**을 의심한다. `sudo ipmitool sensor \| grep -i psu` 로 어느 쪽인지 확인 |
+| 번인 화면이 깨져 보임 | tty 가 아니거나 폭이 좁은 터미널. CSV·로그는 정상으로 남으니 결과 파일로 확인 |
