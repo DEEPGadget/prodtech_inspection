@@ -75,6 +75,10 @@ cd "$RUNDIR" || exit 1
 NCPU=$(nproc)
 GPUNAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
 GPUCNT=$($NVSMI --query-gpu=index --format=csv,noheader | wc -l)
+# 쓰로틀 사유 필드 이름은 드라이버에 따라 clocks_throttle_reasons.* / clocks_event_reasons.*
+# (잘못된 필드가 하나라도 섞이면 대시보드 조회 전체가 비므로 미리 확인)
+TR=clocks_throttle_reasons
+$NVSMI --query-gpu=$TR.hw_power_brake_slowdown --format=csv,noheader >/dev/null 2>&1 || TR=clocks_event_reasons
 # 수집기가 CSV 를 바로 쓴다 (구 GPU_CPU_log.txt → make-csv.sh 단계 없음)
 CSV_FINAL="$RUNDIR/GPU_CPU_${HOSTN}_${STAMP}.csv"
 LOG="$CSV_FINAL"
@@ -91,6 +95,7 @@ fi
 
 hms() { printf '%02d:%02d:%02d' $(($1/3600)) $(($1%3600/60)) $(($1%60)); }
 gt()  { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0>b+0)}'; }   # a > b 이면 true
+ms2s() { printf '%d.%d' $(($1/1000)) $(($1%1000/100)); }        # 밀리초 → "12.3"
 
 RULE="────────────────────────────────────────────────────────────────────────────────"
 
@@ -158,7 +163,8 @@ finish() {
   echo "   ${C_G}GPU 최고온도  : ${gmax} °C${C_RST}"
   local gi
   for gi in $(printf '%s\n' "${!GMAX[@]}" | sort -n); do
-    printf '     GPU%-3s 최고 %s°C   SW Power Cap 누적 %ss\n' "$gi" "${GMAX[$gi]}" "${THP[$gi]}"
+    printf '     GPU%-3s 최고 %s°C   Throttle 열 %ss / 전력 %ss\n' "$gi" "${GMAX[$gi]}" \
+      "$(ms2s "${THT[$gi]}")" "$(ms2s "${THW[$gi]}")"
   done
   echo "   NVMe 최고온도 : ${nmax} °C"
   echo "$RULE"
@@ -201,8 +207,9 @@ NVME_COL=${NVME_COL:-0}
 
 # ---------------------------------------------------------------- 모니터링
 gmax=-1; cmax=-1; nmax=-1
-th_power=0
-declare -A GMAX THP           # GPU별 최고온도 / SW Power Cap 누적(초)
+th_therm=0; th_brake=0        # 어느 GPU 든 열 / HW Power Brake 쓰로틀이던 누적(ms)
+declare -A GMAX THT THW       # GPU별 최고온도 / 열 쓰로틀 누적(ms) / HW Power Brake 누적(ms)
+LAST_MS=0                     # 직전 render 시각(ms) — 누적은 실제 경과시간으로 더한다
 PREV_LINES=0
 : > "$EVENTS"
 [ "$TTY" = 1 ] && printf '\e[?25l'
@@ -225,6 +232,12 @@ render() {
   local rem=$(( DUR - el )); [ "$rem" -lt 0 ] && rem=0
   local pct=$(( el * 100 / (DUR>0?DUR:1) )); [ "$pct" -gt 100 ] && pct=100
 
+  # 한 바퀴는 REFRESH + nvidia-smi/sensors 호출 시간이라 고정 +REFRESH 로 더하면 어긋난다
+  local now_ms dt_ms=0
+  now_ms=$(date +%s%3N)
+  [ "$LAST_MS" -gt 0 ] && dt_ms=$(( now_ms - LAST_MS ))
+  LAST_MS=$now_ms
+
   # 터미널 높이보다 프레임이 길어지면 제자리 갱신이 깨지므로 장식 줄을 뺀다
   # sudo 로 승격하면 stdin 이 tty 가 아닐 수 있어 tput 이 실제 높이 대신 24 를 준다 → /dev/tty 우선
   local tl_rows
@@ -245,35 +258,40 @@ render() {
 
   # ---- GPU : nvidia-smi 1회 호출로 전 GPU 조회, 1장이든 10장이든 한 행씩
   local q
-  q=$($NVSMI --query-gpu=index,temperature.gpu,temperature.gpu.tlimit,power.draw,enforced.power.limit,utilization.gpu,pci.bus_id,clocks_throttle_reasons.sw_power_cap \
+  q=$($NVSMI --query-gpu=index,temperature.gpu,temperature.gpu.tlimit,power.draw,enforced.power.limit,utilization.gpu,pci.bus_id,$TR.sw_thermal_slowdown,$TR.hw_thermal_slowdown,$TR.hw_power_brake_slowdown \
         --format=csv,noheader,nounits 2>/dev/null)
 
-  local hdr; printf -v hdr "$GFMT_H" "GPU" "PCI ADDRESS" "TEMP" "MAX" "SLOWDN" "POWER W" "UTIL" "SW POWER CAP (누적)"
+  local hdr; printf -v hdr "$GFMT_H" "GPU" "PCI ADDRESS" "TEMP" "MAX" "SLOWDN" "POWER W" "UTIL" "THROTTLE  열 / 전력 누적"
   FRAME+=("${C_D}${hdr}${C_RST}")
 
-  local gi gt_ tl pd pl ut bdf r_swpwr
-  local any_pwr=0
-  while IFS=',' read -r gi gt_ tl pd pl ut bdf r_swpwr; do
+  local gi gt_ tl pd pl ut bdf r_swt r_hwt r_pwb
+  local any_th=0 any_pb=0
+  while IFS=',' read -r gi gt_ tl pd pl ut bdf r_swt r_hwt r_pwb; do
     [ -z "${gi:-}" ] && continue
     gi=${gi// /}; gt_=${gt_// /}; tl=${tl// /}; pd=${pd// /}; pl=${pl// /}; ut=${ut// /}
     # nvidia-smi 는 "00000000:C1:00.0" 로 준다 → lspci 표기 "0000:c1:00.0" 로 맞춘다
     bdf=$(echo "$bdf" | tr -d ' ' | tr 'A-F' 'a-f'); bdf=${bdf: -12}
     # "Not Active" 가 *" Active"* 패턴에 걸리므로 공백 제거 후 정확히 비교할 것
-    r_swpwr=${r_swpwr// /}
+    r_swt=${r_swt// /}; r_hwt=${r_hwt// /}; r_pwb=${r_pwb// /}
 
-    : "${GMAX[$gi]:=-1}"; : "${THP[$gi]:=0}"
+    : "${GMAX[$gi]:=-1}"; : "${THT[$gi]:=0}"; : "${THW[$gi]:=0}"
     if gt "$gt_" "${GMAX[$gi]}"; then
       [ "${GMAX[$gi]}" != "-1" ] && echo "$(date '+%H:%M:%S') GPU${gi} ${bdf} MAX ${GMAX[$gi]} -> ${gt_} C" >> "$EVENTS"
       GMAX[$gi]=$gt_
     fi
     gt "$gt_" "$gmax" && gmax=$gt_
 
-    # 쓰로틀은 SW Power Cap(전력 캡에 물림)만 본다.
-    # 주의: 산술식 안의 THP[gi] 는 첨자를 문자열 "gi" 로 해석해 전 GPU 가 키를 공유한다.
-    local capmark="--" thcol="$C_D"
-    if [ "$r_swpwr" = "Active" ]; then
-      THP[$gi]=$(( ${THP[$gi]} + REFRESH )); any_pwr=1
-      capmark="ON"; thcol="$C_Y"
+    # 쓰로틀 기준은 gadget-burn 과 같다: 열(SW/HW Thermal Slowdown) > HW Power Brake.
+    # SW Power Cap 은 TDP 를 다 쓰는 정상 상태라 보지 않는다.
+    # 주의: 산술식 안의 THT[gi] 는 첨자를 문자열 "gi" 로 해석해 전 GPU 가 키를 공유한다.
+    local capmark="-" thcol="$C_D"
+    if [ "$r_swt" = "Active" ] || [ "$r_hwt" = "Active" ]; then
+      THT[$gi]=$(( ${THT[$gi]} + dt_ms )); any_th=1
+      capmark="THERM"; thcol="$C_R"
+    fi
+    if [ "$r_pwb" = "Active" ]; then
+      THW[$gi]=$(( ${THW[$gi]} + dt_ms )); any_pb=1
+      [ "$capmark" = "-" ] && { capmark="PWR"; thcol="$C_Y"; }
     fi
 
     local tcol="$C_G"
@@ -289,11 +307,12 @@ render() {
     printf -v f  '%7s  '  "$tl";                 r+="$f"
     printf -v f  '%13s  ' "${pd}/${pl}";         r+="$f"
     printf -v f  '%4s%%  ' "$ut";                r+="$f"
-    printf -v f  '%-3s'   "$capmark";            r+="${thcol}${f}${C_RST}"
-    r+="${C_D}누적 ${THP[$gi]}s${C_RST}"
+    printf -v f  '%-5s '  "$capmark";            r+="${thcol}${f}${C_RST}"
+    r+="${C_D}열 $(ms2s "${THT[$gi]}")s / 전력 $(ms2s "${THW[$gi]}")s${C_RST}"
     FRAME+=("$r")
   done <<< "$q"
-  [ "$any_pwr" = 1 ] && th_power=$(( th_power + REFRESH ))
+  [ "$any_th" = 1 ] && th_therm=$(( th_therm + dt_ms ))
+  [ "$any_pb" = 1 ] && th_brake=$(( th_brake + dt_ms ))
 
   # ---- CPU : 소켓 수만큼 Tctl(AMD) / Package id(Intel) 을 모두 수집해 최대값 사용
   local ctemps cnow call ccol
@@ -322,8 +341,8 @@ render() {
     PREV_LINES=${#FRAME[@]}
   else
     if [ $(( ( $(date +%s) - START_EPOCH ) % 30 )) -lt "$REFRESH" ]; then
-      printf '[%s] GPU max %s°C  CPU %s°C(max %s)  NVMe %s°C  SW Power Cap 누적 %ss\n' \
-        "$(hms "$el")" "$gmax" "$cnow" "$cmax" "$nnow" "$th_power"
+      printf '[%s] GPU max %s°C  CPU %s°C(max %s)  NVMe %s°C  Throttle 열 %ss / 전력 %ss\n' \
+        "$(hms "$el")" "$gmax" "$cnow" "$cmax" "$nnow" "$(ms2s "$th_therm")" "$(ms2s "$th_brake")"
     fi
   fi
 }

@@ -29,6 +29,13 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     done < <(nvidia-smi --query-gpu=index,pci.bus_id --format=csv,noheader 2>/dev/null)
 fi
 
+# 쓰로틀 사유 필드 이름은 드라이버에 따라 clocks_throttle_reasons.* / clocks_event_reasons.*
+# (잘못된 필드가 하나라도 섞이면 nvidia-smi 조회 전체가 실패하므로 미리 확인)
+TR=clocks_throttle_reasons
+if [[ ${#GPU_IDX[@]} -gt 0 ]] && ! nvidia-smi --query-gpu=$TR.hw_power_brake_slowdown --format=csv,noheader >/dev/null 2>&1; then
+    TR=clocks_event_reasons
+fi
+
 # CPU: 소켓별 온도 센서 라벨 (AMD=Tctl, Intel=Package id N)
 mapfile -t CPU_LABEL < <(sensors 2>/dev/null | grep -oE '^(Tctl|Package id [0-9]+):' | sed 's/:$//')
 [[ ${#CPU_LABEL[@]} -eq 0 ]] && CPU_LABEL=("CPU")
@@ -46,8 +53,9 @@ done
     for ((c=0; c<${#CPU_LABEL[@]}; c++)); do
         printf ',CPU%d_%s(C)' "$c" "$(echo "${CPU_LABEL[$c]}" | tr ' ' '_')"
     done
+    # _Throttle 값: 0 없음 / THERM 열 쓰로틀 / PWR HW Power Brake
     for ((g=0; g<${#GPU_IDX[@]}; g++)); do
-        printf ',GPU%s_%s_Temp(C),GPU%s_%s_Power(W),GPU%s_%s_Util(%%),GPU%s_%s_SWPowerCap' \
+        printf ',GPU%s_%s_Temp(C),GPU%s_%s_Power(W),GPU%s_%s_Util(%%),GPU%s_%s_Throttle' \
             "${GPU_IDX[$g]}" "${GPU_BDF[$g]}" \
             "${GPU_IDX[$g]}" "${GPU_BDF[$g]}" \
             "${GPU_IDX[$g]}" "${GPU_BDF[$g]}" \
@@ -79,12 +87,17 @@ while [ $SECONDS -lt $END ]; do
     # nvidia-smi 1회 호출로 전 GPU
     if [[ ${#GPU_IDX[@]} -gt 0 ]]; then
         mapfile -t gq < <(nvidia-smi \
-            --query-gpu=temperature.gpu,power.draw,utilization.gpu,clocks_throttle_reasons.sw_power_cap \
+            --query-gpu=temperature.gpu,power.draw,utilization.gpu,$TR.sw_thermal_slowdown,$TR.hw_thermal_slowdown,$TR.hw_power_brake_slowdown \
             --format=csv,noheader,nounits 2>/dev/null)
         for ((g=0; g<${#GPU_IDX[@]}; g++)); do
-            IFS=',' read -r gt gp gu gc <<< "${gq[$g]:-,,,}"
+            IFS=',' read -r gt gp gu swt hwt pwb <<< "${gq[$g]:-,,,,,}"
+            # gadget-burn 과 같은 기준: 열(SW/HW Thermal Slowdown) > HW Power Brake.
+            # SW Power Cap 은 TDP 를 다 쓰는 정상 상태라 보지 않는다.
             # "Not Active" 가 " Active" 를 포함하므로 공백 제거 후 정확히 비교할 것
-            gc=${gc// /}; [[ "$gc" == "Active" ]] && gc=1 || gc=0
+            swt=${swt// /}; hwt=${hwt// /}; pwb=${pwb// /}
+            if [[ "$swt" == "Active" || "$hwt" == "Active" ]]; then gc=THERM
+            elif [[ "$pwb" == "Active" ]]; then gc=PWR
+            else gc=0; fi
             row+=",$(echo "$gt" | tr -d ' '),$(echo "$gp" | tr -d ' '),$(echo "$gu" | tr -d ' '),$gc"
         done
     fi

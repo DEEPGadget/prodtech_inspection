@@ -248,9 +248,9 @@ GPU 번인, CPU 번인, 온도 로깅 **3개를 동시에** 돌리고 CSV까지 
  DEEPGadget SW 검수 번인 · deepgadget   경과 00:12:35 / 01:00:00   남은시간 00:47:25
  █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 21%
 ────────────────────────────────────────────────────────────────────────────────
- GPU  PCI ADDRESS     TEMP   MAX   SLOWDN        POWER W   UTIL  SW POWER CAP (누적)
-   0  0000:c1:00.0      90    90        5  598.00/600.00   100%  ON 누적 620s
-   1  0000:c9:00.0      73    90       22  598.00/600.00    99%  ON 누적 615s
+ GPU  PCI ADDRESS     TEMP   MAX   SLOWDN        POWER W   UTIL  THROTTLE  열 / 전력 누적
+   0  0000:c1:00.0      90    90        5  598.00/600.00   100%  THERM 열 41.2s / 전력 0.0s
+   1  0000:c9:00.0      73    90       22  598.00/600.00    99%  -     열 0.0s / 전력 0.0s
  CPU   85.4°C (max 86.1°C)   소켓별 [ 85.4 83.2 ]   128 threads @ stress
  NVMe  43°C (max 43°C)   로그 샘플 151개 · 5s 간격 · Ctrl-C 중단
 ────────────────────────────────────────────────────────────────────────────────
@@ -258,9 +258,11 @@ GPU 번인, CPU 번인, 온도 로깅 **3개를 동시에** 돌리고 CSV까지 
 
 - `PCI ADDRESS` — GPU 를 index 가 아니라 슬롯 주소로 식별한다
 - `SLOWDN` — 하드웨어 슬로우다운까지 남은 여유(°C, `temperature.gpu.tlimit`)
-- `SW POWER CAP` — 전력 캡에 물려 있으면 `ON`, 뒤의 `누적 ..s` 는 **GPU 별**
-  전력 캡에 물린 누적 시간. 부하 중에 계속 `ON` 인 것은 정상이다(설정된 TDP 를
-  다 쓰고 있다는 뜻)
+- `THROTTLE` — gadget-burn 과 같은 기준이다. 열 쓰로틀(SW/HW Thermal Slowdown)이면
+  `THERM`, HW Power Brake 면 `PWR`, 없으면 `-`. 뒤의 누적은 **GPU 별** 열 / 전력
+  쓰로틀 시간. SW Power Cap(설정된 TDP 를 다 쓰는 정상 상태)은 쓰로틀로 치지 않는다
+- 누적은 화면 갱신(약 2초)마다 순간값을 보고 그 사이 경과시간을 더하므로,
+  100ms 마다 세는 gadget-burn 요약과 소수점·초 단위로는 조금 다를 수 있다
 - Ctrl-C 로 중단해도 그 시점까지의 CSV 가 남는다
 
 결과는 실행한 디렉터리 아래 `burnin_<host>_<시각>/` 에 모인다.
@@ -279,8 +281,11 @@ CSV 컬럼은 이런 모양이다. GPU 는 PCI address 로 구분한다.
 ```
 Timestamp,Elapsed(s),Memory_Used(MB),nvme0_Temp(C),CPU0_Tctl(C),
 GPU0_0000:c1:00.0_Temp(C),GPU0_0000:c1:00.0_Power(W),
-GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_SWPowerCap
+GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_Throttle
 ```
+
+`_Throttle` 칼럼은 gadget-burn 과 같은 기준의 쓰로틀 상태다:
+`0` 없음 / `THERM` 열 쓰로틀 / `PWR` HW Power Brake.
 
 ### 알아둘 것
 
