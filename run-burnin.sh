@@ -8,16 +8,27 @@
 #   위 3개를 동시에 실행하고, 현재 GPU/CPU 온도와 GPU 쓰로틀 상태를
 #   터미널에 실시간 갱신 표시한다. 종료 후 make-csv.sh 로 CSV를 생성한다.
 #
-# 사용법:  ./run-burnin.sh [지속시간(초)] [샘플간격(초)]
+# 사용법:  ./run-burnin.sh [지속시간(초)] [샘플간격(초)] [--no-cpu]
 #          기본값: 3600 5
+#          --no-cpu : CPU 번인(stress)을 빼고 GPU 번인 + 온도 로깅만 (functest.sh 가 쓴다)
 #
 # gpu-cpu.sh 내부의 `sudo nvme smart-log` 때문에 root 권한이 필요하다.
 # 일반 계정으로 실행하면 sudo 로 한 번만 승격한 뒤 그대로 이어서 진행한다.
 
 set -uo pipefail
 
-DUR=${1:-3600}
-INTERVAL=${2:-5}
+# 위치 인자(지속시간, 샘플간격)와 옵션(--no-cpu)을 섞어 받는다. sudo 재실행 시 "$@" 그대로 넘어간다.
+DO_CPU=1; POS=()
+for a in "$@"; do
+  case "$a" in
+    --no-cpu) DO_CPU=0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -*) echo "알 수 없는 옵션: $a" >&2; exit 1 ;;
+    *) POS+=("$a") ;;
+  esac
+done
+DUR=${POS[0]:-3600}
+INTERVAL=${POS[1]:-5}
 REFRESH=${REFRESH:-2}          # 화면 갱신 주기(초)
 NVSMI=${NVSMI:-nvidia-smi}     # 대시보드용 조회 명령 (다GPU 렌더링 테스트 시 교체)
 
@@ -73,7 +84,7 @@ fi
 MISSING=0
 [ -n "$SAMPLER" ]     || { echo "[!] lib/sample-sensors.sh 가 없습니다 — 저장소를 통째로 받았는지 확인하세요."; MISSING=1; }
 [ -n "$GADGET_BURN" ] || { echo "[!] gadget_burn 을 찾을 수 없습니다 → 위 목록의 위치에 없습니다. BURN_DIR=/경로 로 알려주거나 ./setup.sh 로 빌드하세요."; MISSING=1; }
-command -v stress >/dev/null || { echo "[!] stress 가 없습니다 → ./setup.sh 를 먼저 실행하세요."; MISSING=1; }
+[ "$DO_CPU" -eq 0 ] || command -v stress >/dev/null || { echo "[!] stress 가 없습니다 → ./setup.sh 를 먼저 실행하세요."; MISSING=1; }
 command -v nvidia-smi >/dev/null || { echo "[!] nvidia-smi 가 없습니다 (NVIDIA 드라이버 미설치)"; MISSING=1; }
 command -v sensors >/dev/null || { echo "[!] sensors 가 없습니다 → ./setup.sh 를 먼저 실행하세요 (lm-sensors)"; MISSING=1; }
 command -v nvme >/dev/null || { echo "[!] nvme 가 없습니다 → ./setup.sh 를 먼저 실행하세요 (nvme-cli)"; MISSING=1; }
@@ -124,7 +135,8 @@ RULE="────────────────────────�
 echo "$RULE"
 echo " ${C_C}DEEPGadget SW 검수 번인${C_RST}  —  $HOSTN"
 echo "   지속시간 : $DUR 초 ($(hms "$DUR"))     로그 샘플간격 : ${INTERVAL}s"
-echo "   CPU      : ${NCPU} threads   (stress -c $NCPU -t $DUR)"
+if [ "$DO_CPU" -eq 1 ]; then echo "   CPU      : ${NCPU} threads   (stress -c $NCPU -t $DUR)"
+else                        echo "   CPU      : 부하 없음 (--no-cpu) — 온도만 기록"; fi
 echo "   GPU      : ${GPUNAME} x${GPUCNT}   (gadget_burn -t $DUR)"
 echo "   결과경로 : $RUNDIR"
 echo "   사용도구 : $GADGET_BURN"
@@ -176,7 +188,7 @@ finish() {
   echo
   echo "${C_D}  부하 프로세스 종료 대기...${C_RST}"
   wait "$BURN_PID" 2>/dev/null
-  wait "$STRESS_PID" 2>/dev/null
+  [ -n "$STRESS_PID" ] && wait "$STRESS_PID" 2>/dev/null
   wait "$GPUCPU_PID" 2>/dev/null
 
   chown -R "$RUN_USER": "$RUNDIR" 2>/dev/null
@@ -257,16 +269,19 @@ START_EPOCH=$(date +%s)
 "$GADGET_BURN" "${BURN_OPTS[@]}" > "$BURN_LOG" 2>&1 &
 BURN_PID=$!
 
-stress -c "$NCPU" -t "$DUR" > "$RUNDIR/stress.log" 2>&1 &
-STRESS_PID=$!
+STRESS_PID=""
+if [ "$DO_CPU" -eq 1 ]; then
+  stress -c "$NCPU" -t "$DUR" > "$RUNDIR/stress.log" 2>&1 &
+  STRESS_PID=$!
+fi
 
 "$SAMPLER" "$INTERVAL" "$DUR" "$CSV_FINAL" > "$RUNDIR/sample-sensors.log" 2>&1 &
 GPUCPU_PID=$!
 
-PIDS=("$BURN_PID" "$STRESS_PID" "$GPUCPU_PID")
+PIDS=("$BURN_PID" ${STRESS_PID:+"$STRESS_PID"} "$GPUCPU_PID")
 trap on_int INT TERM
 
-echo "${C_D}  gadget_burn pid=$BURN_PID / stress pid=$STRESS_PID / sample-sensors pid=$GPUCPU_PID${C_RST}"
+echo "${C_D}  gadget_burn pid=$BURN_PID / stress pid=${STRESS_PID:-없음(--no-cpu)} / sample-sensors pid=$GPUCPU_PID${C_RST}"
 echo "  로그 준비 중..."
 
 for _ in $(seq 1 30); do [ -s "$LOG" ] && break; sleep 1; done
@@ -435,7 +450,7 @@ render() {
   fi
   ccol="$C_G"; gt "$cnow" 80 && ccol="$C_Y"; gt "$cnow" 90 && ccol="$C_R"
   call=$(echo "$ctemps" | tr '\n' ' ' | sed 's/ $//')
-  FRAME+=(" ${C_B}CPU ${C_RST}  ${ccol}${cnow}°C${C_RST} (max ${cmax}°C)   소켓별 [ ${call} ]   ${NCPU} threads @ stress")
+  FRAME+=(" ${C_B}CPU ${C_RST}  ${ccol}${cnow}°C${C_RST} (max ${cmax}°C)   소켓별 [ ${call} ]   $([ "$DO_CPU" -eq 1 ] && echo "${NCPU} threads @ stress" || echo "부하 없음 (--no-cpu)")")
 
   # ---- NVMe / 샘플수 (수집기 CSV 의 마지막 줄에서)
   local last nnow samples

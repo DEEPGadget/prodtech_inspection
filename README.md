@@ -9,7 +9,7 @@ Manycoresoft / DEEPGadget **SW 검수** 스크립트 모음.
 prodtech_inspection/
 ├── setup.sh              # 서버 설정 + 도구 설치     ← 값을 바꾸는 건 여기뿐
 ├── inspect.sh            # 검수 (읽기 전용)          ← 확인만, 아무것도 안 바꿈
-├── functest.sh           # 기능 테스트 (HW 정보 + GPU/CPU 5분 번인)
+├── functest.sh           # 기능 테스트 (HW 정보 + GPU 5분 번인)
 ├── run-burnin.sh         # 1시간 번인 + 온도 CSV
 └── lib/
     ├── sample-sensors.sh    # GPU/CPU/NVMe 온도를 CSV 로 직접 기록
@@ -49,7 +49,7 @@ git clone https://github.com/DEEPGadget/prodtech_inspection.git
 cd prodtech_inspection
 
 ./setup.sh          # 1회. 서버 설정 + 도구 설치 (make 로그가 길다)
-./functest.sh       # 기능 테스트 — HW 정보 + GPU/CPU 5분 번인
+./functest.sh       # 기능 테스트 — HW 정보 + GPU 5분 번인
 ./inspect.sh        # 검수 — 읽기 전용
 ./run-burnin.sh     # 1시간 번인 → CSV
 ```
@@ -126,32 +126,49 @@ mkdir -p ~/검수/DG-2026-001 && cd ~/검수/DG-2026-001
 GPU/CPU 가 부하를 받는지만 짧게 본다.
 
 ```bash
-./functest.sh              # HW 정보 + GPU/CPU 5분 번인
+./functest.sh              # HW 정보 + GPU 5분 번인
 ./functest.sh --mem        # + 메모리 부하 (전체 RAM 의 80%)
 ./functest.sh --mem 30%    # 부하량 지정 (% 또는 4G / 512M)
 ./functest.sh --time 600   # 번인 시간(초)
 ./functest.sh --interval 2 # 온도 샘플 간격(초, 기본 5)
 ./functest.sh --no-hw      # 번인만
-./functest.sh --burn-dir ~/gadget-burn   # gadget_burn 을 저장소 밖에 빌드해 둔 경우
+./functest.sh --no-build   # make clean && make 생략 (있는 바이너리 그대로)
+./functest.sh --burn-dir ~/x/gadget-burn   # gadget-burn 소스/빌드 디렉터리를 직접 지정
 ```
 
-`gadget_burn` 은 시작 전에 먼저 찾고, 없으면 HW 수집에 들어가기 전에 바로 멈춘다
-(찾아본 경로 목록을 보여준다). 찾는 순서는 `BURN_DIR` → `<저장소>/gadget-burn` →
-`<저장소>/../gadget-burn` → `~/gadget-burn` → `PATH` 순이고, 세 스크립트
-(`functest.sh` `inspect.sh` `run-burnin.sh`)가 `lib/find-gadget-burn.sh` 하나를 같이 쓴다.
-`setup.sh` 를 쓰지 않는 서버(검수 대상 그대로 두는 경우)는 `~/gadget-burn` 에 빌드해 두면
-옵션 없이 잡힌다.
+**1단계: gadget-burn 준비.** 소스 디렉터리를 `--burn-dir` → `<저장소>/gadget-burn` →
+`~/gadget-burn` 순으로 찾고, **둘 다 없으면 `<저장소>/gadget-burn` 에 clone** 한다
+(`setup.sh` 가 빌드하는 위치와 같다). 그 다음 번인 전에 **항상 `make clean && make`**
+로 다시 빌드한다 — 드라이버나 CUDA 가 바뀐 서버에서 옛 바이너리로 도는 일을 막기 위해서다.
+nvcc 는 `PATH` → `$CUDA_HOME/bin` → `/usr/local/cuda/bin` 에서 찾는다.
 
-1. **HW 정보** — `inspect.sh --hw-only` 를 그대로 쓴다(PART 1만, 서버 설정은 안 봄).
+CUDA 쪽 문제는 **안내만 하고 고치지 않는다**(설치·변경 없음):
+
+| 상황 | 동작 |
+|---|---|
+| nvcc 없음 | 빌드 건너뜀 + 드라이버가 지원하는 CUDA 버전 안내. 빌드본이 있으면 그걸로 진행 |
+| nvcc 가 드라이버 지원 CUDA 보다 높음 | 경고 후 빌드 시도 (실행 시 `driver version is insufficient` 가능성 안내) |
+| 빌드 실패 (`Unsupported gpu architecture`, `-lnvidia-ml`, cuBLAS 등) | 원인별 안내. `make clean` 전에 보관해 둔 **기존 바이너리를 되돌려** 진행 |
+| 빌드본도 없음 | 번인 불가 → 종료(exit 1). HW 수집은 들어가지 않는다 |
+
+빌드 로그는 `functest_<host>_<시각>/gadget-burn-build.log`, clone 로그는 `gadget-burn-clone.log`.
+빌드된 `gadget_burn` 은 세 스크립트(`functest.sh` `inspect.sh` `run-burnin.sh`)가
+`lib/find-gadget-burn.sh` 로 같은 순서(`BURN_DIR` → `<저장소>/gadget-burn` →
+`<저장소>/../gadget-burn` → `~/gadget-burn` → `PATH`)로 찾는다.
+
+1. **gadget-burn 준비** — 위 참고 (찾기 → 없으면 clone → make clean && make)
+2. **HW 정보** — `inspect.sh --hw-only` 를 그대로 쓴다(PART 1만, 서버 설정은 안 봄).
    gadget_burn 을 먼저 띄워 20초 뒤 수집하므로 GPU PCIe 링크가 최대 속도로 찍힌다.
    끝에 **하드웨어 구성 요약**(CPU 모델/수량/S/N, 메인보드 모델/S/N, RAM 제조사·단품
    용량·속도·수량·총 용량, 스토리지·PCIe 디바이스의 구분/모델/S/N)을 `hw/hw_summary.txt`
    로 남기고, functest 가 끝날 때 다시 출력한다
-2. **GPU + CPU 번인** — `run-burnin.sh` 를 5분으로 호출
-3. **메모리 부하**(옵션) — `stress --vm` 을 번인과 겹쳐서 건다
+3. **GPU 번인** — `run-burnin.sh --no-cpu` 를 5분으로 호출. CPU stress 는 걸지 않고
+   GPU 만 돌리며, CPU 온도는 CSV 에 그대로 기록된다 (1시간 검수 번인은 CPU 도 같이 돈다)
+4. **메모리 부하**(옵션) — `stress --vm` 을 번인과 겹쳐서 건다
 
 ```
 functest_<host>_<시각>/
+├── gadget-burn-build.log  make clean && make 출력 (clone 했으면 gadget-burn-clone.log 도)
 ├── hw/                    inspect.log / serials.csv / hw_summary.txt / raw/
 ├── burnin_<host>_<시각>/  온도 CSV, gadget_burn 로그 등
 └── stress-mem.log         --mem 을 준 경우
@@ -268,6 +285,7 @@ CPU 소켓(`SP6`)이 들어가 어느 자리의 부품인지 바로 짚을 수 �
 ## run-burnin.sh
 
 GPU 번인, CPU 번인, 온도 로깅 **3개를 동시에** 돌리고 CSV까지 만든다.
+`--no-cpu` 를 주면 CPU 번인(stress)을 빼고 GPU 번인 + 온도 로깅만 한다(`functest.sh` 가 쓴다).
 
 ```bash
 ./run-burnin.sh          # 3600초 / 5초 샘플 (기본값)
@@ -403,7 +421,8 @@ GRUB 안내는 exit code 에 반영되지 않는다. `setup.sh` 요약 뒤에 �
 | 증상 | 원인 / 조치 |
 |---|---|
 | `root 로 실행하지 마세요` | `setup.sh` `inspect.sh` 는 일반 계정 전용. `sudo` 를 빼고 다시 |
-| `gadget_burn 을 찾을 수 없습니다` | 메시지 아래에 찾아본 경로 목록이 나온다. 이미 빌드해 둔 곳이 있으면 `--burn-dir /경로`(functest) 또는 `BURN_DIR=/경로`(inspect / run-burnin). 없으면 `./setup.sh` 로 빌드(CUDA 필요) |
+| `gadget_burn 을 찾을 수 없습니다` | 메시지 아래에 찾아본 경로 목록이 나온다. 이미 빌드해 둔 곳이 있으면 `--burn-dir /경로`(functest) 또는 `BURN_DIR=/경로`(inspect / run-burnin). `functest.sh` 는 둘 다 없으면 clone 해서 빌드하므로 CUDA 만 있으면 된다. inspect / run-burnin 단독이면 `./setup.sh` 로 빌드 |
+| functest 가 `[안내] CUDA 툴킷(nvcc)이 없어…` | 빌드 못 함. 드라이버가 지원하는 CUDA 버전 이하의 툴킷을 설치한 뒤 재실행. 빌드본이 있으면 `--no-build` 로 그대로 진행 가능 |
 | 번인 시작 직후 `gadget_burn.log` 가 `invalid option -- 'o'` | 2026-09 이전 gadget-burn(release 1.0). 스크립트가 `-h` 로 미리 판별해 `-o` 없이 돌리므로 번인은 되지만 TFLOPS/Peak 는 안 나온다. `git -C <gadget-burn> pull --ff-only && make -C <gadget-burn>` 으로 갱신 |
 | `Could not get lock /var/lib/dpkg/lock` | 자동 업데이트 타이머가 먼저 깨어난 것. `./setup.sh` 를 다시 돌리면 맨 앞에서 차단하고 진행한다 |
 | GPU 가 `Speed 2.5GT/s (downgraded)` | 유휴 상태로 읽힌 것. `--no-load` 를 뺐는지 확인 (기본은 부하를 건다) |

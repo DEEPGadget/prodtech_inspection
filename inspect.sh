@@ -361,7 +361,15 @@ GPU_N=0
 if have nvidia-smi; then
     GPU_N=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
     kv "Driver"  "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
-    kv "CUDA"    "$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9.]+' | head -1)"
+    # CUDA 는 툴킷(nvcc -V) 버전을 적는다. nvidia-smi 헤더의 숫자는 드라이버가 지원하는 상한일 뿐이라 따로 표기.
+    NVCC_BIN=$(command -v nvcc 2>/dev/null)
+    for c in "${CUDA_HOME:-}/bin/nvcc" /usr/local/cuda/bin/nvcc; do [[ -z "$NVCC_BIN" && -x "$c" ]] && NVCC_BIN=$c; done
+    if [[ -n "$NVCC_BIN" ]]; then
+        kvw "CUDA (nvcc -V)" "$("$NVCC_BIN" --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+' | head -1)  ($NVCC_BIN)"
+    else
+        kvw "CUDA (nvcc -V)" "없음 — nvcc 미설치 (PATH, \$CUDA_HOME/bin, /usr/local/cuda/bin 에 없음)"
+    fi
+    kvw "CUDA (드라이버 지원)" "$(nvidia-smi 2>/dev/null | grep -oP 'CUDA (UMD )?Version: \K[0-9.]+' | head -1)"
     kv "GPU 수"  "${GPU_N} EA"
     printf '\n'
     nvidia-smi 2>/dev/null | sed 's/^/   /'
