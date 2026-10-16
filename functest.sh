@@ -398,7 +398,7 @@ if [[ "$DO_HW" -eq 1 ]]; then
 fi
 if [[ -d "$GPUDIR" ]]; then
     printf '   GPU 상태   : %s  (gpu_list.csv, ecc_before/after.csv, topo.txt, nvlink_status/errors.txt)\n' "$GPUDIR"
-    printf '   GPU 판정   : %s\n' "$([ "$GPU_RC" -eq 0 ] && echo 'ECC/NVLink 이상 없음' || echo '확인 필요 — 위 ECC/NVLink 표시 참고')"
+    printf '   GPU 판정   : %s\n' "$([ "$GPU_RC" -eq 0 ] && echo 'ECC/NVLink 이상 없음' || echo '확인 필요 — 위 GPU 목록/ECC/NVLink 의 ← 표시 참고')"
 fi
 [[ -n "$CSV" ]]      && printf '   온도 CSV   : %s%s%s\n' "$C_B" "$CSV" "$C_RST"
 [[ -n "$BURN_DIR" ]] && printf '   번인 결과  : %s\n' "$BURN_DIR"
