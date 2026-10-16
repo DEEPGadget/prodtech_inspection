@@ -4,8 +4,10 @@
 #
 #   1) gadget-burn 준비 : 소스를 찾아(없으면 clone) make clean && make 로 새로 빌드한다
 #                         CUDA 가 없거나 버전이 안 맞으면 안내만 하고, 기존 빌드본이 있으면 그걸로 간다
-#   2) HW 정보          : inspect.sh 의 하드웨어 점검(PART 1)만 돌린다
-#   3) GPU 번인         : 기본 5분 (검수용 1시간 번인과 구분). CPU stress 는 걸지 않는다
+#   2) GPU 상태         : ECC 카운터, nvidia-smi topo -m, NVLink 링크 상태/에러를 저장·판정한다
+#                         (번인이 끝난 뒤 ECC 를 다시 읽어 늘어난 게 있는지 비교)
+#   3) HW 정보          : inspect.sh 의 하드웨어 점검(PART 1)만 돌린다
+#   4) GPU 번인         : 기본 5분 (검수용 1시간 번인과 구분). CPU stress 는 걸지 않는다
 #                         (run-burnin.sh --no-cpu). CPU 온도는 그대로 기록된다.
 #   옵션) 메모리 부하   : --mem 을 주면 번인에 메모리 스트레스를 함께 건다
 #
@@ -13,11 +15,11 @@
 # 검수(설정 확인 포함)는 inspect.sh, 1시간 번인은 run-burnin.sh 를 쓴다.
 #
 # 사용법:
-#   ./functest.sh                    # HW 정보 + GPU 5분 번인
+#   ./functest.sh                    # GPU 상태 + HW 정보 + GPU 5분 번인
 #   ./functest.sh --mem              # + 메모리 부하 (기본 전체 RAM 의 80%)
 #   ./functest.sh --mem 50%          # 메모리 부하량 지정 (% 또는 4G 같은 절대값)
 #   ./functest.sh --time 600         # 번인 시간(초) 변경
-#   ./functest.sh --no-hw            # 번인만
+#   ./functest.sh --no-hw            # HW 정보 생략 (GPU 상태 + 번인)
 #   ./functest.sh --no-build         # make clean && make 생략 (있는 바이너리 그대로)
 #   ./functest.sh --burn-dir ~/x/gadget-burn   # gadget-burn 소스/빌드 디렉터리를 직접 지정
 #
@@ -49,7 +51,7 @@ while [[ $# -gt 0 ]]; do
         --interval) shift; INTERVAL=${1:-5} ;;
         --burn-dir) shift; BURN_DIR=${1:?--burn-dir 뒤에 경로를 주세요} ;;
         --no-build) DO_BUILD=0 ;;
-        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
     esac
     shift
@@ -78,7 +80,7 @@ hr
 # 소스 디렉터리: --burn-dir → <저장소>/gadget-burn → ~/gadget-burn → (둘 다 없으면) <저장소>/gadget-burn 에 clone.
 # 번인 전에 항상 make clean && make 로 다시 빌드한다(드라이버/CUDA 가 바뀐 서버에서 옛 바이너리로 도는 사고 방지).
 # CUDA 가 없거나 버전이 안 맞으면 고치려 들지 않고 안내만 한다. 기존 빌드본이 있으면 그걸로 계속 간다.
-printf '\n%s[1/3] gadget-burn 준비%s\n' "$C_B" "$C_RST"
+printf '\n%s[1/4] gadget-burn 준비%s\n' "$C_B" "$C_RST"
 GB_SRC=""
 if [[ -n "${BURN_DIR:-}" ]]; then
     GB_SRC=$BURN_DIR; [[ -f "$GB_SRC" ]] && GB_SRC=$(dirname "$GB_SRC")     # 실행파일 경로를 줬으면 그 디렉터리
@@ -162,9 +164,147 @@ else
 fi
 printf '   사용할 바이너리: %s\n' "$GB"
 
-# ---------------------------------------------------------------- 1) HW 정보
+# ---------------------------------------------------------------- 2) GPU 상태 (ECC / topo / NVLink)
+# 번인 전에 ECC 카운터·PCIe/NVLink 토폴로지·NVLink 링크 상태를 저장하고, 번인이 끝난 뒤
+# ECC 를 한 번 더 읽어 늘어난 게 있는지 본다. 설정은 바꾸지 않는다.
+#   ECC    : uncorrected(volatile/aggregate) > 0, row remap uncorrectable/pending/failure > 0 → 확인 필요
+#            ECC 미지원·비활성([N/A]/Disabled) 카드는 카운터가 없으니 표시만 한다
+#   topo   : nvidia-smi topo -m 를 그대로 저장·출력하고 GPU 쌍 중 NVLink(NV#) 로 묶인 수를 요약
+#   NVLink : nvlink -s 에 Link 줄이 하나도 없으면 미지원/미장착 → 건너뜀
+#            한 GPU 에 active 와 inactive 링크가 섞이거나 GPU 마다 active 수가 다르면 브리지 접촉 불량 의심
+#            nvlink -e 의 에러 카운터(Replay/Recovery/CRC) > 0 → 확인 필요
+GPU_RC=0
+GPUDIR="$OUT/gpu"
+ECC_FIELDS=index,name,ecc.mode.current,ecc.errors.corrected.volatile.total,ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.aggregate.total,ecc.errors.uncorrected.aggregate.total
+
+# $1 = 저장 파일. 한 줄 = idx,name,mode,corr_vol,unc_vol,corr_agg,unc_agg,remap_corr,remap_unc,remap_pending,remap_fail
+ecc_snapshot() {
+    local f=$1
+    nvidia-smi --query-gpu=$ECC_FIELDS --format=csv,noheader 2>/dev/null | sed 's/, /,/g' > "$f.ecc" || : > "$f.ecc"
+    # row remapping(Ampere 이후) → 없으면 retired pages(Volta/Turing, failure 칸은 0) → 둘 다 없으면 빈칸
+    if ! nvidia-smi --query-gpu=index,remapped_rows.correctable,remapped_rows.uncorrectable,remapped_rows.pending,remapped_rows.failure \
+            --format=csv,noheader 2>/dev/null | sed 's/, /,/g' > "$f.remap"; then
+        nvidia-smi --query-gpu=index,retired_pages.sbe,retired_pages.dbe,retired_pages.pending --format=csv,noheader 2>/dev/null \
+            | sed 's/, /,/g' | awk -F, '{print $1","$2","$3","$4",0"}' > "$f.remap" || : > "$f.remap"
+    fi
+    # (remap 파일이 비어 있을 수 있어 NR==FNR 대신 FILENAME 으로 구분)
+    awk -F, 'FILENAME == ARGV[1] { sub(/^[^,]*/, "", $0); r[FNR]=$0; next } { print $0 r[FNR] }' "$f.remap" "$f.ecc" > "$f"
+    rm -f "$f.ecc" "$f.remap"
+}
+gt0() { [[ "$1" =~ ^[0-9]+$ && "$1" -gt 0 ]]; }
+
+# $1 = 스냅샷 파일. 표를 찍고 이상이 있으면 GPU_RC=1
+ecc_report() {
+    local f=$1 idx name mode cv uv ca ua rc ru rp rf why
+    printf '   %-3s %-26s %-9s %9s %9s %9s %9s %8s %8s %8s\n' GPU NAME ECC corr_vol unc_vol corr_agg unc_agg remap_u remap_p remap_f
+    while IFS=, read -r idx name mode cv uv ca ua rc ru rp rf; do
+        why=""
+        gt0 "$uv" && why="uncorrected(volatile) $uv"
+        gt0 "$ua" && why="${why:+$why, }uncorrected(aggregate) $ua"
+        gt0 "$ru" && why="${why:+$why, }remap uncorrectable $ru"
+        gt0 "$rp" && why="${why:+$why, }remap pending $rp"
+        gt0 "$rf" && why="${why:+$why, }remap FAILURE $rf"
+        printf '   %-3s %-26.26s %-9s %9s %9s %9s %9s %8s %8s %8s' "$idx" "$name" "${mode:--}" "${cv:--}" "${uv:--}" "${ca:--}" "${ua:--}" "${ru:--}" "${rp:--}" "${rf:--}"
+        if [[ -n "$why" ]]; then printf '  %s← %s%s\n' "$C_R" "$why" "$C_RST"; GPU_RC=1; else printf '\n'; fi
+    done < "$f"
+}
+
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    printf '\n%s[2/4] GPU 상태 (ECC / topo / NVLink)%s\n' "$C_B" "$C_RST"
+    note "nvidia-smi 없음 → 건너뜀"
+else
+    mkdir -p "$GPUDIR"
+    printf '\n%s[2/4] GPU 상태 (ECC / topo / NVLink)%s  → %s\n' "$C_B" "$C_RST" "$GPUDIR"
+
+    # ---- GPU 목록 (한 번의 --query-gpu 로 S/N·UUID·BDF·VBIOS·온도·PCIe·ECC 집계)
+    # pcie.link.gen.gpucurrent 는 최근 드라이버 필드 — 없는 드라이버면 pcie.link.gen.current 로 대체.
+    # (필드 하나라도 모르면 조회 전체가 실패하므로 두 세트를 차례로 시도)
+    printf '   %sGPU 목록%s\n' "$C_B" "$C_RST"
+    GPU_LIST_OK=0
+    for gen_cur in pcie.link.gen.gpucurrent pcie.link.gen.current; do
+        GPU_FIELDS=index,name,serial,uuid,pci.bus_id,vbios_version,temperature.gpu,$gen_cur,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,ecc.errors.uncorrected.aggregate.total
+        if nvidia-smi --query-gpu=$GPU_FIELDS --format=csv,noheader 2>/dev/null | sed 's/, /,/g' > "$GPUDIR/gpu_list.csv" \
+           && [[ -s "$GPUDIR/gpu_list.csv" ]]; then GPU_LIST_OK=1; break; fi
+    done
+    if [[ "$GPU_LIST_OK" -eq 1 ]]; then
+        printf '   %-3s %-26s %-14s %-40s %-16s %-16s %5s %7s %7s %s\n' GPU NAME SERIAL UUID BUS_ID VBIOS TEMP PCIeGen Width ECC_unc_agg
+        while IFS=, read -r idx name serial uuid bus vbios temp gcur gmax wcur wmax ua; do
+            printf '   %-3s %-26.26s %-14s %-40s %-16s %-16s %4s℃ %3s/%-3s %3s/%-3s %s' \
+                "$idx" "$name" "$serial" "$uuid" "$bus" "$vbios" "$temp" "$gcur" "$gmax" "$wcur" "$wmax" "$ua"
+            if gt0 "$ua"; then printf '  %s← uncorrected(aggregate) %s%s\n' "$C_R" "$ua" "$C_RST"; else printf '\n'; fi
+        done < "$GPUDIR/gpu_list.csv"
+        printf '   ※ PCIe current 는 idle 이면 gen/폭이 낮게 나올 수 있다 — 부하 중 판정은 HW 정보 단계의 "PCIe 연결 상태" 표를 볼 것\n'
+    else
+        note "GPU 목록 조회 실패 (nvidia-smi --query-gpu)"
+    fi
+
+    # ---- ECC (번인 전)
+    printf '   %sECC (번인 전)%s\n' "$C_B" "$C_RST"
+    ecc_snapshot "$GPUDIR/ecc_before.csv"
+    if [[ -s "$GPUDIR/ecc_before.csv" ]]; then
+        ecc_report "$GPUDIR/ecc_before.csv"
+        if ! grep -q ',Enabled,' "$GPUDIR/ecc_before.csv"; then
+            note "ECC 가 켜진 GPU 가 없습니다(미지원 또는 Disabled) — 카운터 판정 없이 표시만 합니다"
+        fi
+    else
+        note "ECC 조회 실패 (nvidia-smi --query-gpu 가 값을 주지 않음)"
+    fi
+
+    # ---- topo
+    printf '   %snvidia-smi topo -m%s\n' "$C_B" "$C_RST"
+    if nvidia-smi topo -m > "$GPUDIR/topo.txt" 2>&1; then
+        # 매트릭스만 보여준다(범례는 파일에). GPU 쌍 중 NV# 로 묶인 수 = NV 셀 수 / 2
+        awk 'NF==0 {exit} {print}' "$GPUDIR/topo.txt" | sed 's/^/     /'
+        NV_PAIRS=$(awk '/^GPU[0-9]+/ { for (i=2; i<=NF; i++) if ($i ~ /^NV[0-9]+$/) c++ } END { print int(c/2) }' "$GPUDIR/topo.txt")
+        printf '   NVLink 로 묶인 GPU 쌍: %s개  (범례는 %s)\n' "${NV_PAIRS:-0}" "$GPUDIR/topo.txt"
+    else
+        note "topo -m 실패: $(head -1 "$GPUDIR/topo.txt")"
+    fi
+
+    # ---- NVLink 링크 상태 / 에러
+    printf '   %sNVLink 상태 (nvlink -s / -e)%s\n' "$C_B" "$C_RST"
+    nvidia-smi nvlink -s > "$GPUDIR/nvlink_status.txt" 2>&1 || true
+    nvidia-smi nvlink -e > "$GPUDIR/nvlink_errors.txt" 2>&1 || true
+    # GPU 별 "idx active inactive"
+    NVL=$(awk '/^GPU [0-9]+:/ { if (g != "") print g, a, n; g=$2; sub(":", "", g); a=0; n=0; next }
+               /Link [0-9]+:/ { if ($0 ~ /<inactive>/) n++; else a++ }
+               END { if (g != "") print g, a, n }' "$GPUDIR/nvlink_status.txt")
+    NVL_TOTAL=$(printf '%s\n' "$NVL" | awk '{ s += $2 + $3 } END { print s + 0 }')
+    if [[ "$NVL_TOTAL" -eq 0 ]]; then
+        printf '   NVLink 링크 없음 — 미지원 카드이거나 브리지 미장착 (건너뜀)\n'
+    else
+        printf '   %-3s %7s %9s\n' GPU active inactive
+        NVL_BAD=0; NVL_ACTIVE_SET=$(printf '%s\n' "$NVL" | awk '$2 > 0 { print $2 }' | sort -u | wc -l)
+        while read -r g a n; do
+            [[ -z "$g" ]] && continue
+            printf '   %-3s %7s %9s' "$g" "$a" "$n"
+            if [[ "$a" -gt 0 && "$n" -gt 0 ]]; then
+                printf '  %s← active/inactive 혼재 — 브리지 접촉 확인%s\n' "$C_R" "$C_RST"; NVL_BAD=1
+            elif [[ "$a" -eq 0 ]]; then
+                printf '  (브리지 없음)\n'
+            else
+                printf '\n'
+            fi
+        done <<< "$NVL"
+        if [[ "$NVL_ACTIVE_SET" -gt 1 ]]; then
+            bad "GPU 마다 active 링크 수가 다릅니다 — 브리지 장착/접촉 확인"; NVL_BAD=1
+        fi
+        # 에러 카운터: "... Errors: N" 줄 중 N > 0
+        NVL_ERR=$(grep -oE 'Errors?: *[0-9]+' "$GPUDIR/nvlink_errors.txt" 2>/dev/null | awk -F': *' '$2 > 0 { c++ } END { print c + 0 }')
+        if [[ "$NVL_ERR" -gt 0 ]]; then
+            bad "NVLink 에러 카운터가 0 이 아닌 항목 ${NVL_ERR}개 — $GPUDIR/nvlink_errors.txt"
+            grep -E 'Errors?: *[1-9]' "$GPUDIR/nvlink_errors.txt" | head -8 | sed 's/^/     /'
+            NVL_BAD=1
+        else
+            printf '   NVLink 에러 카운터: 모두 0\n'
+        fi
+        [[ "$NVL_BAD" -eq 1 ]] && GPU_RC=1
+    fi
+fi
+
+# ---------------------------------------------------------------- 3) HW 정보
 if [[ "$DO_HW" -eq 1 ]]; then
-    printf '\n%s[2/3] HW 정보 수집%s\n' "$C_B" "$C_RST"
+    printf '\n%s[3/4] HW 정보 수집%s\n' "$C_B" "$C_RST"
     [[ -x "$SCRIPT_DIR/inspect.sh" ]] || { echo "inspect.sh 를 찾을 수 없습니다: $SCRIPT_DIR" >&2; exit 1; }
     OUTDIR="$OUT/hw" "$SCRIPT_DIR/inspect.sh" --hw-only
     HW_RC=$?
@@ -173,8 +313,8 @@ else
     HW_RC=0
 fi
 
-# ---------------------------------------------------------------- 2) 번인
-printf '\n%s[3/3] GPU 번인 %s초%s  (CPU stress 없음)\n' "$C_B" "$DUR" "$C_RST"
+# ---------------------------------------------------------------- 4) 번인
+printf '\n%s[4/4] GPU 번인 %s초%s  (CPU stress 없음)\n' "$C_B" "$DUR" "$C_RST"
 
 MEM_PID=""
 if [[ "$MEM_LOAD" -eq 1 ]]; then
@@ -214,6 +354,31 @@ BURN_RC=$?
 
 cleanup_mem
 
+# ---------------------------------------------------------------- ECC (번인 후)
+# 번인 전 스냅샷과 비교해 uncorrected / remap 쪽이 늘어난 GPU 를 찾는다.
+if [[ -s "$GPUDIR/ecc_before.csv" ]]; then
+    printf '\n%sECC (번인 후)%s\n' "$C_B" "$C_RST"
+    ecc_snapshot "$GPUDIR/ecc_after.csv"
+    ecc_report "$GPUDIR/ecc_after.csv"
+    ECC_GREW=$(awk -F, 'NR==FNR { b[$1]=$0; next }
+        { split(b[$1], o, ",")
+          d=""
+          if ($5+0 > o[5]+0)   d = d " unc_vol " o[5] "→" $5
+          if ($7+0 > o[7]+0)   d = d " unc_agg " o[7] "→" $7
+          if ($4+0 > o[4]+0)   d = d " corr_vol " o[4] "→" $4
+          if ($9+0 > o[9]+0)   d = d " remap_u " o[9] "→" $9
+          if ($10+0 > o[10]+0) d = d " remap_p " o[10] "→" $10
+          if ($11+0 > o[11]+0) d = d " remap_f " o[11] "→" $11
+          if (d != "") print "GPU" $1 ":" d }' "$GPUDIR/ecc_before.csv" "$GPUDIR/ecc_after.csv")
+    if [[ -n "$ECC_GREW" ]]; then
+        bad "번인 중 ECC 카운터가 늘어난 GPU:"
+        printf '%s\n' "$ECC_GREW" | sed 's/^/     /'
+        GPU_RC=1
+    else
+        printf '   번인 전후 ECC 카운터 변화 없음\n'
+    fi
+fi
+
 # ---------------------------------------------------------------- 요약
 BURN_DIR=$(ls -dt "$OUT"/burnin_* 2>/dev/null | head -1)
 CSV=$(ls -t "$BURN_DIR"/GPU_CPU_*.csv 2>/dev/null | head -1)
@@ -226,6 +391,10 @@ if [[ "$DO_HW" -eq 1 ]]; then
     printf '                %s\n' "$OUT/hw/serials.csv"
     printf '   HW 요약    : %s\n' "$OUT/hw/hw_summary.txt"
     printf '   HW 판정    : %s\n' "$([ "$HW_RC" -eq 0 ] && echo '이상 없음' || echo '확인 필요 항목 있음 — 위 요약 참고')"
+fi
+if [[ -d "$GPUDIR" ]]; then
+    printf '   GPU 상태   : %s  (gpu_list.csv, ecc_before/after.csv, topo.txt, nvlink_status/errors.txt)\n' "$GPUDIR"
+    printf '   GPU 판정   : %s\n' "$([ "$GPU_RC" -eq 0 ] && echo 'ECC/NVLink 이상 없음' || echo '확인 필요 — 위 ECC/NVLink 표시 참고')"
 fi
 [[ -n "$CSV" ]]      && printf '   온도 CSV   : %s%s%s\n' "$C_B" "$CSV" "$C_RST"
 [[ -n "$BURN_DIR" ]] && printf '   번인 결과  : %s\n' "$BURN_DIR"
@@ -242,5 +411,5 @@ if [[ "$DO_HW" -eq 1 && -s "$OUT/hw/hw_summary.txt" ]]; then
 fi
 printf '\n'
 
-[[ "$HW_RC" -ne 0 || "$BURN_RC" -ne 0 ]] && exit 1
+[[ "$HW_RC" -ne 0 || "$GPU_RC" -ne 0 || "$BURN_RC" -ne 0 ]] && exit 1
 exit 0

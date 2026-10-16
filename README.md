@@ -9,7 +9,7 @@ Manycoresoft / DEEPGadget **SW 검수** 스크립트 모음.
 prodtech_inspection/
 ├── setup.sh              # 서버 설정 + 도구 설치     ← 값을 바꾸는 건 여기뿐
 ├── inspect.sh            # 검수 (읽기 전용)          ← 확인만, 아무것도 안 바꿈
-├── functest.sh           # 기능 테스트 (HW 정보 + GPU 5분 번인)
+├── functest.sh           # 기능 테스트 (GPU ECC/topo/NVLink + HW 정보 + GPU 5분 번인)
 ├── run-burnin.sh         # 1시간 번인 + 온도 CSV
 └── lib/
     ├── sample-sensors.sh    # GPU/CPU/NVMe 온도를 CSV 로 직접 기록
@@ -49,7 +49,7 @@ git clone https://github.com/DEEPGadget/prodtech_inspection.git
 cd prodtech_inspection
 
 ./setup.sh          # 1회. 서버 설정 + 도구 설치 (make 로그가 길다)
-./functest.sh       # 기능 테스트 — HW 정보 + GPU 5분 번인
+./functest.sh       # 기능 테스트 — GPU 상태 + HW 정보 + GPU 5분 번인
 ./inspect.sh        # 검수 — 읽기 전용
 ./run-burnin.sh     # 1시간 번인 → CSV
 ```
@@ -122,16 +122,16 @@ mkdir -p ~/검수/DG-2026-001 && cd ~/검수/DG-2026-001
 
 ## functest.sh
 
-출하 전 **기능 확인**용. 검수(`inspect.sh`)보다 가볍게, HW 가 다 보이는지와
-GPU/CPU 가 부하를 받는지만 짧게 본다.
+출하 전 **기능 확인**용. 검수(`inspect.sh`)보다 가볍게, HW 가 다 보이는지,
+GPU 의 ECC/NVLink 가 깨끗한지, GPU 가 부하를 받는지만 짧게 본다.
 
 ```bash
-./functest.sh              # HW 정보 + GPU 5분 번인
+./functest.sh              # GPU 상태 + HW 정보 + GPU 5분 번인
 ./functest.sh --mem        # + 메모리 부하 (전체 RAM 의 80%)
 ./functest.sh --mem 30%    # 부하량 지정 (% 또는 4G / 512M)
 ./functest.sh --time 600   # 번인 시간(초)
 ./functest.sh --interval 2 # 온도 샘플 간격(초, 기본 5)
-./functest.sh --no-hw      # 번인만
+./functest.sh --no-hw      # HW 정보 생략 (GPU 상태 + 번인)
 ./functest.sh --no-build   # make clean && make 생략 (있는 바이너리 그대로)
 ./functest.sh --burn-dir ~/x/gadget-burn   # gadget-burn 소스/빌드 디렉터리를 직접 지정
 ```
@@ -157,18 +157,36 @@ CUDA 쪽 문제는 **안내만 하고 고치지 않는다**(설치·변경 없�
 `<저장소>/../gadget-burn` → `~/gadget-burn` → `PATH`)로 찾는다.
 
 1. **gadget-burn 준비** — 위 참고 (찾기 → 없으면 clone → make clean && make)
-2. **HW 정보** — `inspect.sh --hw-only` 를 그대로 쓴다(PART 1만, 서버 설정은 안 봄).
+2. **GPU 상태 (ECC / topo / NVLink)** — 번인 전에 아래를 `gpu/` 에 저장하고 화면에 표로 찍는다.
+   설정은 바꾸지 않는다.
+   - **GPU 목록**: `nvidia-smi --query-gpu` 한 번으로 GPU 별 이름·S/N·UUID·BDF·VBIOS·온도·
+     PCIe gen/폭(current/max)·ECC uncorrected aggregate 를 한 줄씩 (`gpu/gpu_list.csv`).
+     PCIe current 는 idle 이면 낮게 나오므로 판정은 HW 정보 단계의 "PCIe 연결 상태" 표로 한다.
+   - **ECC**: GPU 별 ECC 모드, corrected/uncorrected (volatile·aggregate), row remapping
+     (Ampere 이후; 없으면 retired pages). **uncorrected > 0 이거나 remap uncorrectable /
+     pending / failure > 0 이면 확인 필요**. ECC 미지원·Disabled(`[N/A]`) 카드는 표시만 한다.
+     번인이 끝나면 한 번 더 읽어 **번인 전후 늘어난 카운터**를 GPU 별로 보여준다.
+   - **topo**: `nvidia-smi topo -m` 매트릭스를 그대로 출력하고(범례는 `gpu/topo.txt`)
+     NVLink(`NV#`)로 묶인 GPU 쌍 수를 요약한다.
+   - **NVLink**: `nvidia-smi nvlink -s` 로 GPU 별 active/inactive 링크 수, `nvlink -e` 로
+     에러 카운터(Replay/Recovery/CRC)를 본다. Link 줄이 하나도 없으면(5090 처럼 NVLink 가
+     없거나 브리지 미장착) 건너뛴다. **한 GPU 에 active/inactive 가 섞이거나, GPU 마다 active
+     수가 다르거나, 에러 카운터가 0 이 아니면 확인 필요** (브리지 장착/접촉 의심).
+3. **HW 정보** — `inspect.sh --hw-only` 를 그대로 쓴다(PART 1만, 서버 설정은 안 봄).
    gadget_burn 을 먼저 띄워 20초 뒤 수집하므로 GPU PCIe 링크가 최대 속도로 찍힌다.
    끝에 **하드웨어 구성 요약**(CPU 모델/수량/S/N, 메인보드 모델/S/N, RAM 제조사·단품
    용량·속도·수량·총 용량, 스토리지·PCIe 디바이스의 구분/모델/S/N)을 `hw/hw_summary.txt`
    로 남기고, functest 가 끝날 때 다시 출력한다
-3. **GPU 번인** — `run-burnin.sh --no-cpu` 를 5분으로 호출. CPU stress 는 걸지 않고
+4. **GPU 번인** — `run-burnin.sh --no-cpu` 를 5분으로 호출. CPU stress 는 걸지 않고
    GPU 만 돌리며, CPU 온도는 CSV 에 그대로 기록된다 (1시간 검수 번인은 CPU 도 같이 돈다)
-4. **메모리 부하**(옵션) — `stress --vm` 을 번인과 겹쳐서 건다
+5. **메모리 부하**(옵션) — `stress --vm` 을 번인과 겹쳐서 건다
+
+GPU 상태 판정에 걸린 항목이 있으면 요약의 `GPU 판정` 에 표시되고 종료 코드가 1 이 된다.
 
 ```
 functest_<host>_<시각>/
 ├── gadget-burn-build.log  make clean && make 출력 (clone 했으면 gadget-burn-clone.log 도)
+├── gpu/                   gpu_list.csv / ecc_before.csv / ecc_after.csv / topo.txt / nvlink_status.txt / nvlink_errors.txt
 ├── hw/                    inspect.log / serials.csv / hw_summary.txt / raw/
 ├── burnin_<host>_<시각>/  온도 CSV, gadget_burn 로그 등
 └── stress-mem.log         --mem 을 준 경우
