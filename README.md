@@ -142,13 +142,17 @@ GPU/CPU 가 부하를 받는지만 짧게 본다.
 `setup.sh` 를 쓰지 않는 서버(검수 대상 그대로 두는 경우)는 `~/gadget-burn` 에 빌드해 두면
 옵션 없이 잡힌다.
 
-1. **HW 정보** — `inspect.sh --hw-only` 를 그대로 쓴다(PART 1만, 서버 설정은 안 봄)
+1. **HW 정보** — `inspect.sh --hw-only` 를 그대로 쓴다(PART 1만, 서버 설정은 안 봄).
+   gadget_burn 을 먼저 띄워 20초 뒤 수집하므로 GPU PCIe 링크가 최대 속도로 찍힌다.
+   끝에 **하드웨어 구성 요약**(CPU 모델/수량/S/N, 메인보드 모델/S/N, RAM 제조사·단품
+   용량·속도·수량·총 용량, 스토리지·PCIe 디바이스의 구분/모델/S/N)을 `hw/hw_summary.txt`
+   로 남기고, functest 가 끝날 때 다시 출력한다
 2. **GPU + CPU 번인** — `run-burnin.sh` 를 5분으로 호출
 3. **메모리 부하**(옵션) — `stress --vm` 을 번인과 겹쳐서 건다
 
 ```
 functest_<host>_<시각>/
-├── hw/                    inspect.log / serials.csv / raw/
+├── hw/                    inspect.log / serials.csv / hw_summary.txt / raw/
 ├── burnin_<host>_<시각>/  온도 CSV, gadget_burn 로그 등
 └── stress-mem.log         --mem 을 준 경우
 ```
@@ -163,9 +167,9 @@ functest_<host>_<시각>/
 하드웨어 점검과 서버 설정을 한 번에 한다. 빌드는 포함하지 않는다.
 
 ```bash
-./inspect.sh                 # PCIe 측정 시 GPU 부하를 걸어 링크를 최대 속도로 올림
+./inspect.sh                 # GPU 부하를 먼저 걸고 20초 뒤 HW 수집 (링크가 최대 속도로 올라온 상태)
 ./inspect.sh --no-load       # 부하 없이
-./inspect.sh --load-sec 120  # 부하 시간 (기본 60초)
+./inspect.sh --load-sec 30   # 부하를 건 뒤 수집 시작까지 기다리는 시간 (기본 20초)
 ./inspect.sh --hw-only       # PART 1(하드웨어)만 — functest.sh 가 쓰는 모드
 ```
 
@@ -186,19 +190,22 @@ inspect_<host>_<시각>/
 부하에 쓰는 것은 **`gadget-burn`** 이다(`setup.sh` 가 `./gadget-burn/` 에 빌드해 둔 것).
 구 `test.sh` 가 쓰던 `gpu-burn` 이 아니다.
 
-### PCIe 측정 전에 GPU 부하를 거는 이유
+### HW 수집 전에 GPU 부하를 먼저 거는 이유
 
 NVIDIA GPU 는 유휴일 때 링크를 Gen1 으로 내린다. 그 상태로 읽으면 멀쩡한 카드가
-`Speed 2.5GT/s (downgraded)` 로 보인다.
+`Speed 2.5GT/s (downgraded)` 로 보인다. 부하가 걸려 있으면 각 장치가 낼 수 있는
+최대 속도(Gen5 카드·슬롯이면 32GT/s, Gen4 면 16GT/s)로 올라온 값이 찍힌다.
 
 ```
 유휴      LnkSta: Speed 2.5GT/s (downgraded), Width x16
 부하 +3s  LnkSta: Speed 32GT/s, Width x16          ← LnkCap 과 일치
 ```
 
-그래서 PCIe 항목에 들어가기 직전 `gadget_burn` 을 백그라운드로 띄우고, 링크가
-재협상될 시간을 준 뒤 읽고, 측정이 끝나면 바로 끝낸다. 부하를 걸었을 때만
-속도까지 합격 판정하고, 못 걸었으면 "속도 판정 불가" 로 남긴다.
+그래서 `inspect.sh` 는 sudo 확인 직후, 원본 덤프와 PART 1 하드웨어 수집에 들어가기
+**전에** `gadget_burn` 을 백그라운드로 띄우고 20초(`--load-sec`) 기다린다. 그 상태로
+`lspci -vvv` 덤프와 PCIe 항목을 읽고, PCIe 항목이 끝나면 바로 부하를 내린다
+(`functest.sh` 의 HW 단계도 같다). 부하를 걸었을 때만 속도까지 합격 판정하고,
+못 걸었으면 "속도 판정 불가" 로 남긴다.
 
 ### 구성품 S/N
 
@@ -360,7 +367,7 @@ GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_Throttle
 |---|---|---|---|
 | `TZ_WANT` | setup / inspect | `Asia/Seoul` | 적용·판정할 타임존 |
 | `CUDA_HOME` | setup | `/usr/local/cuda` | CUDA 를 다른 곳에 깐 경우 |
-| `PCIE_LOAD_SEC` | inspect | `60` | `--load-sec` 와 같음 |
+| `PCIE_LOAD_SEC` | inspect | `20` | `--load-sec` 와 같음 — 부하를 건 뒤 HW 수집 시작까지 대기(초) |
 | `OUTDIR` | inspect | `inspect_<host>_<시각>` | 결과 폴더 지정 (`functest.sh` 가 쓴다) |
 | `OUT_ROOT` | run-burnin | 실행한 디렉터리 | `burnin_*` 를 만들 상위 경로 |
 | `BURN_DIR` | functest / inspect / run-burnin | (탐색) | `gadget_burn` 이 있는 디렉터리(또는 실행파일 경로). 없으면 `<저장소>/gadget-burn` → `<저장소>/../gadget-burn` → `~/gadget-burn` → `PATH` 순으로 찾는다 |

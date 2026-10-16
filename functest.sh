@@ -134,6 +134,7 @@ hr
 if [[ "$DO_HW" -eq 1 ]]; then
     printf '   HW 정보    : %s\n' "$OUT/hw/inspect.log"
     printf '                %s\n' "$OUT/hw/serials.csv"
+    printf '   HW 요약    : %s\n' "$OUT/hw/hw_summary.txt"
     printf '   HW 판정    : %s\n' "$([ "$HW_RC" -eq 0 ] && echo '이상 없음' || echo '확인 필요 항목 있음 — 위 요약 참고')"
 fi
 [[ -n "$CSV" ]]      && printf '   온도 CSV   : %s%s%s\n' "$C_B" "$CSV" "$C_RST"
@@ -141,6 +142,12 @@ fi
 [[ "$MEM_LOAD" -eq 1 ]] && printf '   메모리 부하: %s\n' "$OUT/stress-mem.log"
 printf '   전체       : %s\n' "$OUT"
 hr
+# 하드웨어 구성 요약(CPU / 메인보드 / RAM / 스토리지 / PCIe) — inspect.sh 가 만든 파일을 그대로 보여준다.
+# 번인 화면이 길어 HW 단계 출력이 위로 밀려나므로 맨 끝에 한 번 더 찍는다.
+if [[ "$DO_HW" -eq 1 && -s "$OUT/hw/hw_summary.txt" ]]; then
+    cat "$OUT/hw/hw_summary.txt"
+    hr
+fi
 printf '\n'
 
 [[ "$HW_RC" -ne 0 || "$BURN_RC" -ne 0 ]] && exit 1

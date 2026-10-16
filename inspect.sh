@@ -12,14 +12,16 @@
 #     - 도구가 없다고 나오면          → ./setup.sh 를 실행
 #
 # 사용법:
-#   ./inspect.sh                 # PCIe 측정 시 GPU 부하를 걸어 링크를 최대 속도로 올림
-#   ./inspect.sh --no-load       # 부하 없이 (유휴 링크 속도가 그대로 찍힘)
-#   ./inspect.sh --load-sec 120  # 부하 시간(기본 60초)
+#   ./inspect.sh                 # GPU 부하(gadget_burn)를 먼저 걸고 20초 뒤 HW 수집
+#                                #   → 각 장치의 PCIe 링크가 낼 수 있는 최대 속도로 올라온 상태에서 읽는다
+#   ./inspect.sh --no-load       # 부하 없이 (GPU 는 유휴 Gen1 속도가 그대로 찍힘)
+#   ./inspect.sh --load-sec 30   # 부하를 건 뒤 수집 시작까지 기다리는 시간(기본 20초)
 #   ./inspect.sh --hw-only       # PART 1(하드웨어)만 하고 끝 — functest.sh 가 쓴다
 #
 # 결과는 실행한 디렉터리 아래 inspect_<host>_<시각>/ 에 모인다.
 #   inspect.log   전체 출력
 #   serials.csv   구성품 S/N 목록 (검수확인서용)
+#   hw_summary.txt 하드웨어 구성 요약 (CPU/메인보드/RAM/스토리지/PCIe — functest 가 끝에 출력)
 #   raw/          lspci -vvv, dmidecode, nvidia-smi -q, ipmitool sdr 등 원본 덤프
 
 set -uo pipefail
@@ -32,13 +34,13 @@ fi
 # --check 는 예전 옵션. 이제 항상 읽기 전용이라 받아만 주고 무시한다.
 PCIE_LOAD=1
 HW_ONLY=0
-PCIE_LOAD_SEC=${PCIE_LOAD_SEC:-60}
+PCIE_LOAD_SEC=${PCIE_LOAD_SEC:-20}
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --check|--check-only|--no-apply) ;;
         --no-load) PCIE_LOAD=0 ;;
         --hw-only) HW_ONLY=1 ;;
-        --load-sec) shift; PCIE_LOAD_SEC=${1:-60} ;;
+        --load-sec) shift; PCIE_LOAD_SEC=${1:-20} ;;
         -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
     esac
@@ -99,7 +101,7 @@ print_summary() {
     printf '\n'; hr
     printf '  정상 %d / 확인 필요 %d / 건너뜀 %d\n' "$OK_COUNT" "$FAIL_COUNT" "$SKIP_COUNT"
     printf '  결과 : %s\n' "$OUTDIR"
-    printf '           inspect.log  /  serials.csv  /  raw/\n'
+    printf '           inspect.log  /  serials.csv  /  hw_summary.txt  /  raw/\n'
     hr
 }
 
@@ -107,6 +109,21 @@ print_summary() {
 SERIALS=()
 # add_sn <분류> <식별자> <위치(PCI address/슬롯)> <S/N> [비고]
 add_sn() { SERIALS+=("$1|$2|${3:--}|$4|${5:-}"); }
+
+# 하드웨어 구성 요약(hw_summary.txt)용 — 검수확인서의 구성 항목 순서대로 모아 PART 1 끝에 찍고,
+# functest.sh 가 번인이 끝난 뒤 마지막에 다시 출력한다.
+HW_SUMMARY="$OUTDIR/hw_summary.txt"
+CPU_SN_ROWS=()       # "CPU1: S/N"
+DIMM_ROWS=()         # "제조사|용량|속도"
+ST_ROWS=()           # "구분|모델|S/N|장치 용량"
+PCIE_ROWS=()         # "구분|모델|S/N|S/N 출처"
+add_pcie() { PCIE_ROWS+=("$1|$2|${3:--}|${4:-}"); }
+# 한글 라벨은 글자당 2칸을 차지해 printf %-Ns 로는 열이 어긋난다 → 표시 폭을 세서 채운다
+kvw() {
+    local l=$1 c b w pad
+    c=${#l}; b=$(printf '%s' "$l" | wc -c); w=$(( c + (b - c) / 2 )); pad=$(( 22 - w )); [[ $pad -lt 1 ]] && pad=1
+    printf '   %s%*s %s\n' "$l" "$pad" '' "$2"
+}
 # 값이 비었거나 의미 없는 자리표시자면 "-" 로 정규화
 sn_clean() {
     local v="${1//$'\t'/ }"; v="$(echo "$v" | sed 's/^ *//;s/ *$//')"
@@ -131,6 +148,60 @@ kv "결과경로" "$OUTDIR"
 
 log "sudo 권한 확인"
 sudo -v || { err "sudo 권한이 필요합니다."; exit 1; }
+
+# ---------------------------------------------------------------- GPU 부하 (HW 수집 전)
+# NVIDIA GPU 는 유휴일 때 링크를 Gen1(2.5GT/s)로 내린다. 그 상태로 읽으면 멀쩡한 카드가
+# "downgraded" 로 보인다. 그래서 HW 수집(원본 덤프 포함)에 들어가기 전에 gadget_burn 을
+# 먼저 띄우고 잠시 기다려, 각 장치가 낼 수 있는 최대 링크 속도로 올라온 상태에서 읽는다.
+# (실측: 유휴 2.5GT/s → 부하 3초 만에 32GT/s; 카드/슬롯이 Gen4 면 16GT/s 가 최대로 찍힌다)
+# 부하는 PCIe 항목 측정이 끝나는 즉시 내린다(gpu_load_stop). 비정상 종료 시에도 trap 으로 내린다.
+GPULOAD_PID=""; PCIE_LOADED=0
+gpu_load_start() {
+    [[ "$PCIE_LOAD" -eq 1 ]] || { warn "--no-load: 유휴 상태로 측정합니다 (GPU 링크가 낮게 보일 수 있음)"; return 0; }
+    have nvidia-smi || { warn "nvidia-smi 없음 → GPU 부하 없이 진행합니다"; return 0; }
+    # 탐색 순서는 lib/find-gadget-burn.sh 참고 (BURN_DIR → 저장소 → 저장소 옆 → ~/gadget-burn → PATH)
+    local gb=""
+    if [[ -x "$SCRIPT_DIR/lib/find-gadget-burn.sh" ]]; then
+        gb=$("$SCRIPT_DIR/lib/find-gadget-burn.sh" "$SCRIPT_DIR" "$HOME" 2>/dev/null)
+    else
+        for c in "${BURN_DIR:-$SCRIPT_DIR/gadget-burn}/gadget_burn" "$SCRIPT_DIR/gadget-burn/gadget_burn" \
+                 "$HOME/gadget-burn/gadget_burn" "$(command -v gadget_burn 2>/dev/null)"; do
+            [[ -n "$c" && -x "$c" ]] && { gb="$c"; break; }
+        done
+    fi
+    if [[ -z "$gb" ]]; then
+        warn "gadget_burn 이 없어 부하 없이 측정합니다 → BURN_DIR=/경로 로 알려주거나 ./setup.sh 로 빌드 후 다시 검수하세요."
+        return 0
+    fi
+    log "GPU 부하 인가 — HW 수집 전 ${PCIE_LOAD_SEC}초 대기 (PCIe 링크를 최대 속도로 올리기 위함)"
+    printf '   %s\n' "$gb"
+    # 지속시간은 넉넉히 주고 PCIe 측정이 끝나면 PID 로 끝낸다 (끝까지 돌지 않는다)
+    "$gb" -t 900 > "$RAWDIR/pcie-load-burn.log" 2>&1 &
+    GPULOAD_PID=$!
+    local t
+    for ((t = 0; t < PCIE_LOAD_SEC; t++)); do
+        kill -0 "$GPULOAD_PID" 2>/dev/null || break
+        sleep 1
+    done
+    if ! kill -0 "$GPULOAD_PID" 2>/dev/null; then
+        warn "gadget_burn 이 ${t}초 만에 끝났습니다 → 부하 없이 측정합니다. 로그: $RAWDIR/pcie-load-burn.log"
+        wait "$GPULOAD_PID" 2>/dev/null; GPULOAD_PID=""
+        return 0
+    fi
+    PCIE_LOADED=1
+    printf '   GPU util %s%%  power %sW  → 부하 인가됨 (%s초 경과)\n' \
+        "$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)" \
+        "$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits 2>/dev/null | head -1)" "$t"
+}
+gpu_load_stop() {
+    # 주의: pkill -f gadget_burn 은 이 스크립트 자신의 명령줄까지 잡아 죽인다. PID 로만 끝낼 것.
+    [[ -n "$GPULOAD_PID" ]] || return 0
+    kill "$GPULOAD_PID" 2>/dev/null
+    wait "$GPULOAD_PID" 2>/dev/null
+    GPULOAD_PID=""
+}
+trap 'gpu_load_stop; flush_log' EXIT INT TERM
+gpu_load_start
 
 # 증빙용 원본 덤프 (요약이 놓친 것을 나중에 되짚을 수 있도록)
 # 주의: 이 스크립트는 stdout 을 tee 프로세스 치환으로 넘겨두었다. 덤프를 &로 띄우고
@@ -195,6 +266,7 @@ while IFS='|' read -r sock ver sn cid; do
     [[ "$sn" == "-" ]] && sn="CPUID $(echo "$cid" | tr -d ' ')"
     printf '   %-22s %s\n' "S/N (${sock})" "$sn"
     add_sn "CPU" "${ver}" "$sock" "$sn"
+    CPU_SN_ROWS+=("${sock}: ${sn}")
     i=$((i+1))
 done < <(sudo dmidecode -t processor 2>/dev/null | awk '
     /^Processor Information/ {sock="";ver="";sn="";cid=""}
@@ -225,6 +297,7 @@ if have dmidecode; then
             dsn=$(sn_clean "$dsn")
             printf '   %-18s %-9s %-11s %-10s %-18s %s\n' "$loc" "$size" "$spd" "$mf" "$pn" "$dsn"
             add_sn "DIMM" "${size} ${mf} ${pn}" "$loc" "$dsn"
+            DIMM_ROWS+=("$(echo "$mf" | sed 's/^ *//;s/ *$//')|$size|$spd")
         done < <(sudo dmidecode -t memory 2>/dev/null | awk '
           function flush(){ if (size ~ /^[0-9]/) print loc"|"size"|"spd"|"mf"|"pn"|"sn;
                             size="";loc="";spd="";pn="";mf="";sn="" }
@@ -248,14 +321,26 @@ fi
 
 # ---------------------------------------------------------------- Storage
 title "Storage 정보"
-printf '   %-12s %-9s %-24s %-22s %s\n' "NAME" "SIZE" "MODEL" "S/N" "ROTA"
-while read -r n sz tp sn rota model; do
-    [[ "$tp" == "disk" ]] || continue
-    sn=$(sn_clean "$sn")
-    [[ "$rota" == "1" ]] && rota="HDD" || rota="SSD"
-    printf '   %-12s %-9s %-24s %-22s %s\n' "$n" "$sz" "${model:-?}" "$sn" "$rota"
+printf '   %-12s %-9s %-24s %-22s %s\n' "NAME" "SIZE" "MODEL" "S/N" "TYPE"
+# lsblk --pairs: SERIAL/TRAN 이 빈 장치(가상 디스크, 일부 USB)가 있어도 칼럼이 밀리지 않는다
+lsblk_f() { local v; v=$(printf '%s' "$1" | grep -o "$2=\"[^\"]*\"" | head -1); v=${v#*=\"}; printf '%s' "${v%\"}"; }
+while IFS= read -r line; do
+    tp=$(lsblk_f "$line" TYPE); [[ "$tp" == "disk" ]] || continue
+    n=$(lsblk_f "$line" NAME); sz=$(lsblk_f "$line" SIZE); model=$(lsblk_f "$line" MODEL)
+    sn=$(sn_clean "$(lsblk_f "$line" SERIAL)"); rota=$(lsblk_f "$line" ROTA); tran=$(lsblk_f "$line" TRAN)
+    [[ "$rota" == "1" ]] && media="HDD" || media="SSD"
+    case "$tran" in
+        nvme)     kind="NVMe SSD" ;;
+        sata|ata) kind="SATA $media" ;;
+        sas)      kind="SAS $media" ;;
+        usb)      kind="USB $media" ;;
+        "")       kind="$media" ;;
+        *)        kind="${tran^^} $media" ;;
+    esac
+    printf '   %-12s %-9s %-24s %-22s %s\n' "$n" "$sz" "${model:-?}" "$sn" "$kind"
     add_sn "Storage" "${sz} ${model}" "/dev/$n" "$sn"
-done < <(lsblk -dno NAME,SIZE,TYPE,SERIAL,ROTA,MODEL)
+    ST_ROWS+=("$kind|${model:-?}|$sn|/dev/$n $sz")
+done < <(lsblk -dn --pairs -o NAME,SIZE,TYPE,SERIAL,ROTA,TRAN,MODEL)
 DISK_N=$(lsblk -dno TYPE | grep -c '^disk$')
 if have nvme; then
     printf '\n   NVMe:\n'
@@ -298,6 +383,7 @@ if have nvidia-smi; then
         sbdf=$(echo "$bus" | tr 'A-F' 'a-f'); sbdf=${sbdf: -12}
         printf '   %-4s %-14s %-34s %-16s %-9s %s\n' "$i" "$sbdf" "$(echo "${n# }" | cut -c1-34)" "${v// /}" "$src" "$ident"
         add_sn "GPU" "${n# }" "$sbdf" "$ident" "$note"
+        add_pcie "GPU" "${n# }" "$ident" "$src"
     done < <(nvidia-smi --query-gpu=index,name,vbios_version,serial,uuid,pci.bus_id,memory.total --format=csv,noheader)
     if [[ "$GPU_NOSN" -gt 0 ]]; then
         printf '   ※ %d장은 보드 S/N 이 없는 소비자용 카드입니다(GeForce 계열). UUID 를 식별자로 기록했습니다.\n' "$GPU_NOSN"
@@ -319,45 +405,8 @@ fi
 
 # ---------------------------------------------------------------- PCIe
 title "PCIe 연결 상태"
-# NVIDIA GPU 는 유휴일 때 링크를 Gen1(2.5GT/s)로 내린다. 그 상태로 읽으면
-# "downgraded" 로 보이므로, 측정 직전에 GPU 부하를 걸어 최대 속도로 올린 뒤 읽는다.
-# (실측: 유휴 2.5GT/s → 부하 3초 만에 32GT/s)
-GPULOAD_PID=""; PCIE_LOADED=0
-gpu_load_start() {
-    [[ "$PCIE_LOAD" -eq 1 ]] || { warn "--no-load: 유휴 상태로 측정합니다 (GPU 링크가 낮게 보일 수 있음)"; return 0; }
-    # 탐색 순서는 lib/find-gadget-burn.sh 참고 (BURN_DIR → 저장소 → 저장소 옆 → ~/gadget-burn → PATH)
-    local gb=""
-    if [[ -x "$SCRIPT_DIR/lib/find-gadget-burn.sh" ]]; then
-        gb=$("$SCRIPT_DIR/lib/find-gadget-burn.sh" "$SCRIPT_DIR" "$HOME" 2>/dev/null)
-    else
-        for c in "${BURN_DIR:-$SCRIPT_DIR/gadget-burn}/gadget_burn" "$SCRIPT_DIR/gadget-burn/gadget_burn" \
-                 "$HOME/gadget-burn/gadget_burn" "$(command -v gadget_burn 2>/dev/null)"; do
-            [[ -n "$c" && -x "$c" ]] && { gb="$c"; break; }
-        done
-    fi
-    if [[ -z "$gb" ]]; then
-        warn "gadget_burn 이 없어 부하 없이 측정합니다 → BURN_DIR=/경로 로 알려주거나 ./setup.sh 로 빌드 후 다시 검수하세요."
-        return 0
-    fi
-    printf '   GPU 부하 %s초 인가 중 (링크를 최대 속도로 올리기 위함): %s\n' "$PCIE_LOAD_SEC" "$gb"
-    "$gb" -t "$PCIE_LOAD_SEC" > "$RAWDIR/pcie-load-burn.log" 2>&1 &
-    GPULOAD_PID=$!
-    # 링크 재협상 대기 (3초면 충분하지만 여유를 둔다)
-    sleep 6
-    PCIE_LOADED=1
-    printf '   GPU util %s%%  power %sW  → 부하 인가됨\n' \
-        "$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)" \
-        "$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits 2>/dev/null | head -1)"
-}
-gpu_load_stop() {
-    # 주의: pkill -f gadget_burn 은 이 스크립트 자신의 명령줄까지 잡아 죽인다. PID 로만 끝낼 것.
-    [[ -n "$GPULOAD_PID" ]] || return 0
-    kill "$GPULOAD_PID" 2>/dev/null
-    wait "$GPULOAD_PID" 2>/dev/null
-    GPULOAD_PID=""
-}
-trap 'gpu_load_stop; flush_log' EXIT INT TERM
-gpu_load_start
+# GPU 부하는 스크립트 첫머리에서 이미 걸어 두었다(gpu_load_start). 여기서는 읽기만 하고
+# 측정이 끝나면 내린다. 부하 중이라야 GPU 링크가 유휴 Gen1 이 아닌, 낼 수 있는 최대 속도로 찍힌다.
 # GPU 는 LnkSta(현재) 와 LnkCap(카드 능력)을 같이 본다.
 # NOTE: 온보드 NIC 등이 x4 로 뜨는 것은 설계상 정상인 경우가 많다.
 #       폭 판정은 해당 슬롯의 상위 브리지 LnkSta 로 확인할 것.
@@ -449,12 +498,14 @@ else
         RAID_SN=$(sn_clean "$(grep -iE "Serial Number" "$RAWDIR/raid-controller.txt" 2>/dev/null | head -1 | awk -F'= *|: *' '{print $NF}')")
         kv "RAID S/N" "$RAID_SN"
         add_sn "RAID" "$(echo "$RAID_LIST" | head -1 | cut -d: -f3- | sed 's/^ *//' | cut -c1-48)" "$(echo "$RAID_LIST" | head -1 | awk '{print $1}')" "$RAID_SN"
+        add_pcie "RAID" "$(echo "$RAID_LIST" | head -1 | cut -d: -f3- | sed 's/^ *//' | cut -c1-48)" "$RAID_SN" "$RAID_TOOL"
         record OK "RAID Card" "$(echo "$RAID_LIST" | head -1 | cut -c1-60) / $RAID_TOOL / S/N $RAID_SN"
     else
         warn "RAID 관리도구(storcli/perccli/MegaCli 등)가 없어 어레이 상태·S/N 을 읽지 못했습니다."
         while read -r bdf; do
             dsn=$(sudo lspci -vv -s "$bdf" 2>/dev/null | grep -i "Device Serial Number" | awk '{print $NF}' | head -1)
             add_sn "RAID" "$(lspci -s "$bdf" | cut -d: -f3- | sed 's/^ *//' | cut -c1-48)" "$bdf" "$(sn_clean "$dsn")" "관리도구 없음"
+            add_pcie "RAID" "$(lspci -s "$bdf" | cut -d: -f3- | sed 's/^ *//' | cut -c1-48)" "$(sn_clean "$dsn")" "$([[ -n "$dsn" ]] && echo "PCIe DSN" || echo "관리도구 없음")"
         done < <(echo "$RAID_LIST" | awk '{print $1}')
         record FAIL "RAID Card" "카드는 인식됨 / 관리도구 없음 — storcli 설치 후 어레이 상태·S/N 확인 필요"
     fi
@@ -462,10 +513,15 @@ fi
 
 # ---------------------------------------------------------------- 기타 추가 부품
 title "기타 추가 부품 (GPU·NIC·RAID·IB 제외 PCIe 장치)"
-lspci 2>/dev/null \
-  | grep -viE 'nvidia|mellanox|infiniband|ethernet|raid|non-volatile|bridge|host|isa|smbus|usb|audio|encryption|system peripheral|sata|iommu|non-essential instrumentation|signal processing' \
-  | sed 's/^/   /' | head -20
-ETC_N=$(lspci 2>/dev/null | grep -viE 'nvidia|mellanox|infiniband|ethernet|raid|non-volatile|bridge|host|isa|smbus|usb|audio|encryption|system peripheral|sata|iommu|non-essential instrumentation|signal processing' | wc -l)
+ETC_LIST=$(lspci 2>/dev/null \
+  | grep -viE 'nvidia|mellanox|infiniband|ethernet|raid|non-volatile|bridge|host|isa|smbus|usb|audio|encryption|system peripheral|sata|iommu|non-essential instrumentation|signal processing' || true)
+echo "$ETC_LIST" | grep . | sed 's/^/   /' | head -20
+ETC_N=$(echo "$ETC_LIST" | grep -c .)
+while read -r bdf rest; do
+    [[ -z "$bdf" ]] && continue
+    dsn=$(sudo lspci -vv -s "$bdf" 2>/dev/null | grep -i "Device Serial Number" | awk '{print $NF}' | head -1)
+    add_pcie "Other" "$(echo "$rest" | cut -d: -f2- | sed 's/^ *//' | cut -c1-48)" "$(sn_clean "$dsn")" "$([[ -n "$dsn" ]] && echo "PCIe DSN")"
+done <<< "$ETC_LIST"
 record OK "기타 추가 부품" "분류되지 않은 PCIe 장치 ${ETC_N}개 (위 목록 확인)"
 
 # ---------------------------------------------------------------- Network
@@ -499,6 +555,7 @@ for i in /sys/class/net/*; do
             if [[ -n "$dsn" ]]; then src="PCIe DSN(카드 공통)"; else src="고정MAC"; fi
             note="$src"; [[ -n "$fw" ]] && note="$note / fw $fw"
             add_sn "NIC" "${n} (${sp}) ${model}" "$bdf" "$sn" "$note"
+            add_pcie "NIC" "${model} [${n}]" "$sn" "$([[ -n "$dsn" ]] && echo "PCIe DSN" || echo "고정MAC")"
     fi
 done
 
@@ -509,6 +566,7 @@ for d in /sys/class/infiniband/*; do
     ibbdf=$(basename "$(readlink -f "$d/device" 2>/dev/null)" 2>/dev/null)
     add_sn "IB/HCA" "$ca $(cat "$d/board_id" 2>/dev/null)" "${ibbdf:--}" \
            "$(cat "$d/node_guid" 2>/dev/null)" "fw $(cat "$d/fw_ver" 2>/dev/null) (node_guid)"
+    add_pcie "IB" "$ca $(cat "$d/board_id" 2>/dev/null)" "$(cat "$d/node_guid" 2>/dev/null)" "node_guid"
 done
 if have network-test; then
     printf '\n'
@@ -575,6 +633,57 @@ else
 fi
 
 # ---------------------------------------------------------------- 구성품 S/N
+# ---------------------------------------------------------------- 하드웨어 구성 요약
+# 검수확인서 구성 항목(CPU / 메인보드 / RAM / 스토리지 / PCIe 디바이스) 순서로 한 화면에 모은다.
+# 같은 내용을 hw_summary.txt 로 남기고, functest.sh 가 끝날 때 이 파일을 다시 출력한다.
+print_hw_summary() {
+    local row
+    printf '\n\033[1;36m▌%s\033[0m\n' "하드웨어 구성 요약"
+    kvw "CPU 모델명"   "${CPU_MODEL:-?}"
+    kvw "CPU 수량"     "${CPU_SOCKETS:-?} EA  (${CPU_CORES_PER:-?} core/socket, ${CPU_THREADS:-?} threads)"
+    if [[ ${#CPU_SN_ROWS[@]} -gt 0 ]]; then
+        kvw "CPU S/N" "${CPU_SN_ROWS[0]}"
+        local i; for ((i = 1; i < ${#CPU_SN_ROWS[@]}; i++)); do kvw "" "${CPU_SN_ROWS[$i]}"; done
+    else
+        kvw "CPU S/N" "-"
+    fi
+    kvw "메인보드 모델명" "${BB_VENDOR} ${BB_MODEL}"
+    kvw "메인보드 S/N"    "${BB_SN:--}"
+    if [[ ${#DIMM_ROWS[@]} -gt 0 ]]; then
+        # 제조사|용량|속도 조합별로 묶어 센다. 혼용 구성이면 조합마다 한 줄씩.
+        local groups vendors sizes speeds total
+        groups=$(printf '%s\n' "${DIMM_ROWS[@]}" | sort | uniq -c | sed 's/^ *//')
+        vendors=$(printf '%s\n' "${DIMM_ROWS[@]}" | cut -d'|' -f1 | sort -u | paste -sd, | sed 's/,/, /g')
+        sizes=$(echo "$groups" | awk '{c=$1; $1=""; sub(/^ /,""); split($0,f,"|"); printf "%s%s x %d EA", (NR>1?", ":""), f[2], c}')
+        speeds=$(printf '%s\n' "${DIMM_ROWS[@]}" | cut -d'|' -f3 | sort -u | paste -sd, | sed 's/,/, /g')
+        total=$(printf '%s\n' "${DIMM_ROWS[@]}" | cut -d'|' -f2 | awk '
+            /GB/ {s+=$1} /MB/ {s+=$1/1024} /TB/ {s+=$1*1024} END { if (s==int(s)) printf "%d GB", s; else printf "%.1f GB", s }')
+        kvw "RAM 제조사"    "$vendors"
+        kvw "RAM 단품 용량" "$sizes"
+        kvw "RAM 동작 속도" "${speeds:--}"
+        kvw "RAM 수량"      "${#DIMM_ROWS[@]} EA"
+        kvw "RAM 총 용량"   "${total}  (OS 인식 ${MEM_TOTAL:-?})"
+    else
+        kvw "RAM" "DIMM 정보 없음 (OS 인식 ${MEM_TOTAL:-?})"
+    fi
+    local fmt='   %-22s %-12s %-44s %s\n' kind model sn dev src
+    kvw "스토리지 디바이스" "$([[ ${#ST_ROWS[@]} -gt 0 ]] && echo "${#ST_ROWS[@]} EA" || echo '없음')"
+    [[ ${#ST_ROWS[@]} -gt 0 ]] && printf "$fmt" "" "TYPE" "MODEL" "S/N"
+    for row in "${ST_ROWS[@]}"; do
+        IFS='|' read -r kind model sn dev <<< "$row"
+        printf "$fmt" "" "$kind" "$(echo "$model ($dev)" | cut -c1-44)" "$sn"
+    done
+    kvw "PCIe 디바이스" "$([[ ${#PCIE_ROWS[@]} -gt 0 ]] && echo "${#PCIE_ROWS[@]} EA" || echo '없음')"
+    [[ ${#PCIE_ROWS[@]} -gt 0 ]] && printf "$fmt" "" "TYPE" "MODEL" "S/N"
+    for row in "${PCIE_ROWS[@]}"; do
+        IFS='|' read -r kind model sn src <<< "$row"
+        printf "$fmt" "" "$kind" "$(echo "$model" | cut -c1-44)" "$sn${src:+ ($src)}"
+    done
+}
+print_hw_summary
+print_hw_summary | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' > "$HW_SUMMARY"
+printf '\n   → %s\n' "$HW_SUMMARY"
+
 title "구성품 S/N  (검수확인서용)"
 if [[ ${#SERIALS[@]} -eq 0 ]]; then
     warn "수집된 S/N 이 없습니다."
