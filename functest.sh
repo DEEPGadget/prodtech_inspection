@@ -231,9 +231,13 @@ else
         while IFS=, read -r idx name serial uuid bus vbios temp gcur gmax wcur wmax ua; do
             printf '   %-3s %-26.26s %-14s %-40s %-16s %-16s %4s℃ %3s/%-3s %3s/%-3s %s' \
                 "$idx" "$name" "$serial" "$uuid" "$bus" "$vbios" "$temp" "$gcur" "$gmax" "$wcur" "$wmax" "$ua"
-            if gt0 "$ua"; then printf '  %s← uncorrected(aggregate) %s%s\n' "$C_R" "$ua" "$C_RST"; else printf '\n'; fi
+            # gen 은 idle 이면 내려가지만 폭(width)은 내려가지 않는다 → current < max 면 슬롯/라이저 문제
+            why=""
+            gt0 "$ua" && why="uncorrected(aggregate) $ua"
+            [[ "$wcur" =~ ^[0-9]+$ && "$wmax" =~ ^[0-9]+$ && "$wcur" -lt "$wmax" ]] && why="${why:+$why, }PCIe 폭 x$wcur (카드는 x$wmax)"
+            if [[ -n "$why" ]]; then printf '  %s← %s%s\n' "$C_R" "$why" "$C_RST"; GPU_RC=1; else printf '\n'; fi
         done < "$GPUDIR/gpu_list.csv"
-        printf '   ※ PCIe current 는 idle 이면 gen/폭이 낮게 나올 수 있다 — 부하 중 판정은 HW 정보 단계의 "PCIe 연결 상태" 표를 볼 것\n'
+        printf '   ※ PCIe gen current 는 idle 이면 낮게 나온다(판정 안 함). 폭(Width)은 idle 에도 유지되므로 max 보다 작으면 확인 필요.\n'
     else
         note "GPU 목록 조회 실패 (nvidia-smi --query-gpu)"
     fi

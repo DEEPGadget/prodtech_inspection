@@ -161,7 +161,8 @@ CUDA 쪽 문제는 **안내만 하고 고치지 않는다**(설치·변경 없�
    설정은 바꾸지 않는다.
    - **GPU 목록**: `nvidia-smi --query-gpu` 한 번으로 GPU 별 이름·S/N·UUID·BDF·VBIOS·온도·
      PCIe gen/폭(current/max)·ECC uncorrected aggregate 를 한 줄씩 (`gpu/gpu_list.csv`).
-     PCIe current 는 idle 이면 낮게 나오므로 판정은 HW 정보 단계의 "PCIe 연결 상태" 표로 한다.
+     PCIe gen current 는 idle 이면 낮게 나오므로 판정하지 않지만, 폭(width)은 idle 에도 유지되므로
+     **current < max 면 확인 필요**(슬롯/라이저 의심). 부하 중 속도 판정은 HW 정보 단계가 한다.
    - **ECC**: GPU 별 ECC 모드, corrected/uncorrected (volatile·aggregate), row remapping
      (Ampere 이후; 없으면 retired pages). **uncorrected > 0 이거나 remap uncorrectable /
      pending / failure > 0 이면 확인 필요**. ECC 미지원·Disabled(`[N/A]`) 카드는 표시만 한다.
