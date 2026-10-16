@@ -216,9 +216,9 @@ ip -d addr      > "$RAWDIR/ip-addr.txt"   2>&1
 lsusb -t        > "$RAWDIR/lsusb.txt"     2>&1
 have nvidia-smi && nvidia-smi -q > "$RAWDIR/nvidia-smi-q.txt" 2>&1
 if have ipmitool; then
-    sudo ipmitool sdr    > "$RAWDIR/ipmitool-sdr.txt"    2>&1
-    sudo ipmitool sensor > "$RAWDIR/ipmitool-sensor.txt" 2>&1
-    sudo ipmitool fru    > "$RAWDIR/ipmitool-fru.txt"    2>&1
+    sudo timeout 20 ipmitool sdr    > "$RAWDIR/ipmitool-sdr.txt"    2>&1
+    sudo timeout 20 ipmitool sensor > "$RAWDIR/ipmitool-sensor.txt" 2>&1
+    sudo timeout 20 ipmitool fru    > "$RAWDIR/ipmitool-fru.txt"    2>&1
 fi
 have nvme && sudo nvme list > "$RAWDIR/nvme-list.txt" 2>&1
 dmesg 2>/dev/null | grep -iE "pcie|nvidia|mlx|error" > "$RAWDIR/dmesg-filtered.txt" 2>&1
@@ -604,7 +604,7 @@ title "PSU 상태 (인식 / 온도 / Fan RPM)"
 if have ipmitool; then
     # NOTE: AC 미연결 PSU 는 센서 읽기가 실패하며 ipmitool 이 exit 1 을 낸다.
     #       "|| true" 로 감싸지 않으면 여기서 스크립트가 죽는다.
-    PSU_RAW=$(sudo ipmitool sensor 2>/dev/null | grep -iE '^\s*PSU' || true)
+    PSU_RAW=$(sudo timeout 20 ipmitool sensor 2>/dev/null | grep -iE '^\s*PSU' || true)
     if [[ -z "$PSU_RAW" ]]; then
         warn "ipmitool 센서 목록에서 PSU 항목을 찾지 못했습니다."
         record FAIL "PSU 상태" "PSU 센서 없음 — BMC SDR 확인 필요"
@@ -624,10 +624,10 @@ if have ipmitool; then
         fi
     fi
     printf '\n   [Temperature]\n'
-    sudo ipmitool sdr type Temperature 2>/dev/null | sed 's/^/   /' | head -15
+    sudo timeout 20 ipmitool sdr type Temperature 2>/dev/null | sed 's/^/   /' | head -15
     printf '\n   [Fan]\n'
-    sudo ipmitool sdr type Fan 2>/dev/null | sed 's/^/   /' | head -20
-    FAN_ZERO_LIST=$(sudo ipmitool sdr type Fan 2>/dev/null | awk -F'|' '$NF ~ /^ *0 RPM/ {gsub(/^ +| +$/,"",$1); printf "%s ", $1}')
+    sudo timeout 20 ipmitool sdr type Fan 2>/dev/null | sed 's/^/   /' | head -20
+    FAN_ZERO_LIST=$(sudo timeout 20 ipmitool sdr type Fan 2>/dev/null | awk -F'|' '$NF ~ /^ *0 RPM/ {gsub(/^ +| +$/,"",$1); printf "%s ", $1}')
     FAN_ZERO=$(echo "$FAN_ZERO_LIST" | wc -w)
     if [[ "${FAN_ZERO:-0}" -gt 0 ]]; then
         warn "0 RPM 인 팬: ${FAN_ZERO_LIST}(미장착 헤더면 정상, 장착돼 있으면 고착)"
