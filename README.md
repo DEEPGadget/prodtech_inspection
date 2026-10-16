@@ -12,7 +12,8 @@ prodtech_inspection/
 ├── functest.sh           # 기능 테스트 (HW 정보 + GPU/CPU 5분 번인)
 ├── run-burnin.sh         # 1시간 번인 + 온도 CSV
 └── lib/
-    └── sample-sensors.sh # GPU/CPU/NVMe 온도를 CSV 로 직접 기록
+    ├── sample-sensors.sh    # GPU/CPU/NVMe 온도를 CSV 로 직접 기록
+    └── find-gadget-burn.sh  # gadget_burn 탐색 (세 스크립트가 같이 씀)
 ```
 
 구 `Check_server_information` 과 `setup_tools.sh` 를 대체한다. 이 저장소 하나면 된다.
@@ -131,7 +132,15 @@ GPU/CPU 가 부하를 받는지만 짧게 본다.
 ./functest.sh --time 600   # 번인 시간(초)
 ./functest.sh --interval 2 # 온도 샘플 간격(초, 기본 5)
 ./functest.sh --no-hw      # 번인만
+./functest.sh --burn-dir ~/gadget-burn   # gadget_burn 을 저장소 밖에 빌드해 둔 경우
 ```
+
+`gadget_burn` 은 시작 전에 먼저 찾고, 없으면 HW 수집에 들어가기 전에 바로 멈춘다
+(찾아본 경로 목록을 보여준다). 찾는 순서는 `BURN_DIR` → `<저장소>/gadget-burn` →
+`<저장소>/../gadget-burn` → `~/gadget-burn` → `PATH` 순이고, 세 스크립트
+(`functest.sh` `inspect.sh` `run-burnin.sh`)가 `lib/find-gadget-burn.sh` 하나를 같이 쓴다.
+`setup.sh` 를 쓰지 않는 서버(검수 대상 그대로 두는 경우)는 `~/gadget-burn` 에 빌드해 두면
+옵션 없이 잡힌다.
 
 1. **HW 정보** — `inspect.sh --hw-only` 를 그대로 쓴다(PART 1만, 서버 설정은 안 봄)
 2. **GPU + CPU 번인** — `run-burnin.sh` 를 5분으로 호출
@@ -270,11 +279,11 @@ GPU 번인, CPU 번인, 온도 로깅 **3개를 동시에** 돌리고 CSV까지 
 
 ```
  DEEPGadget SW 검수 번인 · deepgadget   경과 00:12:35 / 01:00:00   남은시간 00:47:25
- █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 21%
+ █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 21%   합계 172.803 TFLOPS
 ────────────────────────────────────────────────────────────────────────────────
- GPU  PCI ADDRESS     TEMP   MAX   SLOWDN        POWER W   UTIL  THROTTLE  열 / 전력 누적
-   0  0000:c1:00.0      90    90        5  598.00/600.00   100%  THERM 열 41.2s / 전력 0.0s
-   1  0000:c9:00.0      73    90       22  598.00/600.00    99%  -     열 0.0s / 전력 0.0s
+ GPU  PCI ADDRESS     TEMP   MAX   SLOWDN        POWER W   UTIL    TFLOPS    PEAK  THROTTLE  열 / 전력 누적
+   0  0000:c1:00.0      90    90        5  598.00/600.00   100%    86.412   82.4%  THERM 열 41.2s / 전력 0.0s
+   1  0000:c9:00.0      73    90       22  598.00/600.00    99%    86.391   82.3%  -     열 0.0s / 전력 0.0s
  CPU   85.4°C (max 86.1°C)   소켓별 [ 85.4 83.2 ]   128 threads @ stress
  NVMe  43°C (max 43°C)   로그 샘플 151개 · 5s 간격 · Ctrl-C 중단
 ────────────────────────────────────────────────────────────────────────────────
@@ -287,6 +296,13 @@ GPU 번인, CPU 번인, 온도 로깅 **3개를 동시에** 돌리고 CSV까지 
   쓰로틀 시간. SW Power Cap(설정된 TDP 를 다 쓰는 정상 상태)은 쓰로틀로 치지 않는다
 - 누적은 화면 갱신(약 2초)마다 순간값을 보고 그 사이 경과시간을 더하므로,
   100ms 마다 세는 gadget-burn 요약과 소수점·초 단위로는 조금 다를 수 있다
+- `TFLOPS` / `PEAK` — gadget-burn 이 매초 `gadget_burn.csv` 에 쓰는 값을 그대로 옮긴다
+  (gadget-burn 화면과 같은 최근 10초 슬라이딩 윈도우, PEAK = TFLOPS / 현재 클럭 기준 이론 피크).
+  색도 gadget-burn 과 같다: 70% 이상 초록 / 60~69% 노랑 / 60% 미만 빨강.
+  시작 직후 gadget-burn 이 초기화·autotune 하는 동안은 `-` 로 나온다
+- 종료 요약의 GPU별 `TFLOPS` / `Peak` 는 gadget-burn 의 "최종 측정 결과"(전체 측정 구간 평균).
+  Ctrl-C 로 중단하면 gadget-burn 이 그 결과를 내지 않으므로 CSV 1Hz 값의 평균으로 대신하고 그렇게 표시한다
+- 표가 터미널 폭보다 넓으면 줄이 접히지 않고 오른쪽이 잘린다(제자리 갱신이 깨지지 않게)
 - Ctrl-C 로 중단해도 그 시점까지의 CSV 가 남는다
 
 결과는 실행한 디렉터리 아래 `burnin_<host>_<시각>/` 에 모인다.
@@ -347,13 +363,14 @@ GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_Throttle
 | `PCIE_LOAD_SEC` | inspect | `60` | `--load-sec` 와 같음 |
 | `OUTDIR` | inspect | `inspect_<host>_<시각>` | 결과 폴더 지정 (`functest.sh` 가 쓴다) |
 | `OUT_ROOT` | run-burnin | 실행한 디렉터리 | `burnin_*` 를 만들 상위 경로 |
-| `BURN_DIR` | run-burnin | `<저장소>/gadget-burn` | `gadget_burn` 을 다른 곳에 빌드해 둔 경우 |
-| `LIB_DIR` | run-burnin | `<저장소>/lib` | `sample-sensors.sh` 위치 |
+| `BURN_DIR` | functest / inspect / run-burnin | (탐색) | `gadget_burn` 이 있는 디렉터리(또는 실행파일 경로). 없으면 `<저장소>/gadget-burn` → `<저장소>/../gadget-burn` → `~/gadget-burn` → `PATH` 순으로 찾는다 |
+| `LIB_DIR` | run-burnin | `<저장소>/lib` | `sample-sensors.sh` / `find-gadget-burn.sh` 위치 |
 | `REFRESH` | run-burnin | `2` | 대시보드 갱신 주기(초) |
 
-`run-burnin.sh` 는 `exec sudo` 로 자기를 재실행하므로 환경변수가 그대로 넘어가지
-않는다. 넘기려면 `sudo OUT_ROOT=/data ./run-burnin.sh` 처럼 sudo 에 직접 주거나,
-`cd` 로 위치를 잡고 실행한다(`functest.sh` 가 쓰는 방법).
+`run-burnin.sh` 는 `exec sudo` 로 자기를 재실행한다. sudo 는 환경변수를 버리지만
+위 표의 `BURN_DIR` `LIB_DIR` `OUT_ROOT` `REFRESH` 는 스크립트가 `env` 로 직접 넘기므로
+`BURN_DIR=~/gadget-burn ./run-burnin.sh` 처럼 앞에 붙이면 된다. 그 밖의 변수는
+넘어가지 않는다.
 
 ## 종료 코드
 
@@ -379,7 +396,8 @@ GRUB 안내는 exit code 에 반영되지 않는다. `setup.sh` 요약 뒤에 �
 | 증상 | 원인 / 조치 |
 |---|---|
 | `root 로 실행하지 마세요` | `setup.sh` `inspect.sh` 는 일반 계정 전용. `sudo` 를 빼고 다시 |
-| `gadget_burn 을 찾을 수 없습니다` | `./setup.sh` 미실행 또는 CUDA 없이 실행됨. CUDA 설치 후 `./setup.sh` 재실행 |
+| `gadget_burn 을 찾을 수 없습니다` | 메시지 아래에 찾아본 경로 목록이 나온다. 이미 빌드해 둔 곳이 있으면 `--burn-dir /경로`(functest) 또는 `BURN_DIR=/경로`(inspect / run-burnin). 없으면 `./setup.sh` 로 빌드(CUDA 필요) |
+| 번인 시작 직후 `gadget_burn.log` 가 `invalid option -- 'o'` | 2026-09 이전 gadget-burn(release 1.0). 스크립트가 `-h` 로 미리 판별해 `-o` 없이 돌리므로 번인은 되지만 TFLOPS/Peak 는 안 나온다. `git -C <gadget-burn> pull --ff-only && make -C <gadget-burn>` 으로 갱신 |
 | `Could not get lock /var/lib/dpkg/lock` | 자동 업데이트 타이머가 먼저 깨어난 것. `./setup.sh` 를 다시 돌리면 맨 앞에서 차단하고 진행한다 |
 | GPU 가 `Speed 2.5GT/s (downgraded)` | 유휴 상태로 읽힌 것. `--no-load` 를 뺐는지 확인 (기본은 부하를 건다) |
 | 온보드 NIC 이 `Width x4` 로 ❌ | 설계상 x4 인 보드가 많다(예: MS73-HB2 의 BCM57416). 슬롯 카드가 아니면 상위 브리지의 `LnkSta` 를 보고 판단한다 |

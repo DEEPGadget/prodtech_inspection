@@ -325,12 +325,18 @@ title "PCIe 연결 상태"
 GPULOAD_PID=""; PCIE_LOADED=0
 gpu_load_start() {
     [[ "$PCIE_LOAD" -eq 1 ]] || { warn "--no-load: 유휴 상태로 측정합니다 (GPU 링크가 낮게 보일 수 있음)"; return 0; }
+    # 탐색 순서는 lib/find-gadget-burn.sh 참고 (BURN_DIR → 저장소 → 저장소 옆 → ~/gadget-burn → PATH)
     local gb=""
-    for c in "$SCRIPT_DIR/gadget-burn/gadget_burn" "$(command -v gadget_burn 2>/dev/null)"; do
-        [[ -n "$c" && -x "$c" ]] && { gb="$c"; break; }
-    done
+    if [[ -x "$SCRIPT_DIR/lib/find-gadget-burn.sh" ]]; then
+        gb=$("$SCRIPT_DIR/lib/find-gadget-burn.sh" "$SCRIPT_DIR" "$HOME" 2>/dev/null)
+    else
+        for c in "${BURN_DIR:-$SCRIPT_DIR/gadget-burn}/gadget_burn" "$SCRIPT_DIR/gadget-burn/gadget_burn" \
+                 "$HOME/gadget-burn/gadget_burn" "$(command -v gadget_burn 2>/dev/null)"; do
+            [[ -n "$c" && -x "$c" ]] && { gb="$c"; break; }
+        done
+    fi
     if [[ -z "$gb" ]]; then
-        warn "gadget_burn 이 없어 부하 없이 측정합니다 → ./setup.sh 실행 후 다시 검수하세요."
+        warn "gadget_burn 이 없어 부하 없이 측정합니다 → BURN_DIR=/경로 로 알려주거나 ./setup.sh 로 빌드 후 다시 검수하세요."
         return 0
     fi
     printf '   GPU 부하 %s초 인가 중 (링크를 최대 속도로 올리기 위함): %s\n' "$PCIE_LOAD_SEC" "$gb"

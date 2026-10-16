@@ -15,6 +15,10 @@
 #   ./functest.sh --mem 50%          # 메모리 부하량 지정 (% 또는 4G 같은 절대값)
 #   ./functest.sh --time 600         # 번인 시간(초) 변경
 #   ./functest.sh --no-hw            # 번인만
+#   ./functest.sh --burn-dir ~/gadget-burn   # gadget_burn 을 저장소 밖에 빌드해 둔 경우
+#
+# gadget_burn 은 BURN_DIR → <저장소>/gadget-burn → <저장소>/../gadget-burn → ~/gadget-burn → PATH
+# 순으로 찾는다 (lib/find-gadget-burn.sh). 없으면 번인 전에 바로 멈춘다.
 #
 # 결과는 실행한 디렉터리 아래 functest_<host>_<시각>/ 에 모인다.
 
@@ -36,11 +40,20 @@ while [[ $# -gt 0 ]]; do
             if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then shift; MEM_SIZE="$1"; fi ;;
         --no-hw) DO_HW=0 ;;
         --interval) shift; INTERVAL=${1:-5} ;;
-        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        --burn-dir) shift; BURN_DIR=${1:?--burn-dir 뒤에 경로를 주세요} ;;
+        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
     esac
     shift
 done
+
+# gadget_burn 이 없으면 HW 수집(수 분)까지 돌고 나서 번인 단계에서 실패한다.
+# 시작 전에 같은 탐색기로 먼저 확인하고, inspect/run-burnin 에도 같은 경로가 가게 BURN_DIR 로 넘긴다.
+[[ -n "${BURN_DIR:-}" ]] && export BURN_DIR
+if [[ -x "$SCRIPT_DIR/lib/find-gadget-burn.sh" ]]; then
+    GB=$("$SCRIPT_DIR/lib/find-gadget-burn.sh" "$SCRIPT_DIR" "$HOME") || exit 1
+    export BURN_DIR="$(dirname "$GB")"
+fi
 
 HOSTN=$(hostname)
 STAMP=$(date +%Y%m%d_%H%M%S)
@@ -55,6 +68,7 @@ printf ' %sDEEPGadget 기능 테스트%s  —  %s\n' "$C_C" "$C_RST" "$HOSTN"
 printf '   HW 정보    : %s\n' "$([ "$DO_HW" -eq 1 ] && echo '수집' || echo '생략 (--no-hw)')"
 printf '   번인       : GPU + CPU %s초\n' "$DUR"
 printf '   메모리 부하: %s\n' "$([ "$MEM_LOAD" -eq 1 ] && echo "$MEM_SIZE" || echo '없음 (--mem 으로 켬)')"
+printf '   gadget_burn: %s\n' "${GB:-PATH 에서 탐색}"
 printf '   결과경로   : %s\n' "$OUT"
 hr
 
@@ -103,8 +117,8 @@ cleanup_mem() {
 trap 'cleanup_mem' EXIT INT TERM
 
 [[ -x "$SCRIPT_DIR/run-burnin.sh" ]] || { echo "run-burnin.sh 를 찾을 수 없습니다: $SCRIPT_DIR" >&2; cleanup_mem; exit 1; }
-# NOTE: run-burnin.sh 는 exec sudo 로 자기를 재실행한다. sudo 는 기본적으로 환경변수를
-#       버리므로 OUT_ROOT 를 넘겨도 소용없다. cwd 는 보존되므로 결과 폴더에서 실행한다.
+# NOTE: run-burnin.sh 는 exec sudo 로 자기를 재실행한다. BURN_DIR/OUT_ROOT 같은 자기 설정값은
+#       env 로 직접 넘기지만, 결과 위치는 cwd 가 보존되는 성질을 그대로 써서 결과 폴더에서 실행한다.
 ( cd "$OUT" && "$SCRIPT_DIR/run-burnin.sh" "$DUR" "$INTERVAL" )
 BURN_RC=$?
 
