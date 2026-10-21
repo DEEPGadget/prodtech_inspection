@@ -27,6 +27,7 @@ for a in "$@"; do
     --no-cpu) DO_CPU=0 ;;
     -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
+    --skip-version-check) export PI_SKIP_VERSION_CHECK=1 ;;
     -*) echo "알 수 없는 옵션: $a" >&2; exit 1 ;;
     *) POS+=("$a") ;;
   esac
@@ -35,6 +36,7 @@ DUR=${POS[0]:-3600}
 INTERVAL=${POS[1]:-5}
 REFRESH=${REFRESH:-2}          # 화면 갱신 주기(초)
 NVSMI=${NVSMI:-nvidia-smi}     # 대시보드용 조회 명령 (다GPU 렌더링 테스트 시 교체)
+pi_check_latest                # sudo 재실행 전에 원래 사용자로 확인한다 (결과는 PI_VERSION_CHECKED 로 넘어감)
 
 # ---------------------------------------------------------------- root 승격
 if [ "$(id -u)" -ne 0 ]; then
@@ -42,7 +44,7 @@ if [ "$(id -u)" -ne 0 ]; then
   # sudo 는 환경변수를 버리므로 이 스크립트가 보는 설정값만 env 로 명시해서 넘긴다
   # (sudoers 의 env_keep 설정과 무관하게 동작한다)
   PASS=()
-  for v in BURN_DIR LIB_DIR OUT_ROOT REFRESH NVSMI PI_VERSION; do
+  for v in BURN_DIR LIB_DIR OUT_ROOT REFRESH NVSMI PI_VERSION PI_VERSION_CHECKED; do
     [ -n "${!v:-}" ] && PASS+=("$v=${!v}")
   done
   exec sudo -- env ${PASS[@]+"${PASS[@]}"} "$0" "$@"

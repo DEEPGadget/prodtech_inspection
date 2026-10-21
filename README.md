@@ -11,11 +11,12 @@ prodtech_inspection/
 ├── inspect.sh            # 검수 (읽기 전용)          ← 확인만, 아무것도 안 바꿈
 ├── functest.sh           # 기능 테스트 (GPU ECC/topo/NVLink + HW 정보, --burn 이면 + GPU 5분 번인)
 ├── run-burnin.sh         # 1시간 번인 + 온도 CSV
-├── VERSION               # 현재 버전 (1.0)
+├── update.sh             # 최신 버전(태그)으로 업데이트
+├── VERSION               # 현재 버전
 └── lib/
     ├── sample-sensors.sh    # GPU/CPU/NVMe 온도를 CSV 로 직접 기록
     ├── find-gadget-burn.sh  # gadget_burn 탐색 (세 스크립트가 같이 씀)
-    └── version.sh           # 버전 문자열 (네 스크립트가 같이 씀)
+    └── version.sh           # 버전 문자열 + 최신 버전 확인 (네 스크립트가 같이 씀)
 ```
 
 모든 스크립트는 `-h` / `--help` 로 사용법을, `--version` 으로 버전을 찍는다
@@ -52,6 +53,7 @@ CUDA 가 없으면 `setup.sh` 는 `gadget-burn` 을 clone 까지만 하고 ⚠�
 ```bash
 git clone https://github.com/DEEPGadget/prodtech_inspection.git
 cd prodtech_inspection
+./update.sh         # 이미 clone 해 둔 폴더면 먼저 최신으로 (구버전이면 다른 스크립트가 실행을 거부한다)
 
 ./setup.sh          # 1회. 서버 설정 + 도구 설치 (make 로그가 길다)
 ./functest.sh       # 기능 테스트 — GPU 상태 + HW 정보 (GPU 부하 없음)
@@ -450,7 +452,7 @@ BURN_DIR=~/x/gadget-burn ~/prodtech_inspection/lib/find-gadget-burn.sh ~/prodtec
 
 ## 버전
 
-현재 버전은 저장소 루트의 `VERSION` 파일(`1.0`)이고, GitHub 에는 같은 이름의 태그(`v1.0`)로 남긴다.
+현재 버전은 저장소 루트의 `VERSION` 파일이고, GitHub 에는 같은 이름의 태그(`v1.1` 등)로 남긴다.
 네 스크립트 모두 시작 배너와 결과 요약에 버전을 찍고, `--version` 으로 바로 확인할 수 있다.
 `run-burnin.sh` 는 `system_info.txt` 에도 기록한다.
 
@@ -465,7 +467,52 @@ git clone 한 폴더에서는 `git describe` 결과가 붙어 서버의 클론�
 
 scp 로 복사해 `.git` 이 없으면 `VERSION` 값만 나온다.
 
+### 구버전이면 실행하지 않는다 → `update.sh`
+
+검수용 SSD 마다 clone 해 둔 사본이 오래돼도 모르고 쓰는 일을 막기 위해, 네 스크립트는 시작할 때
+GitHub 의 **최신 태그**와 비교해 **구버전이면 실행하지 않고 빠져나온다**(exit 1).
+업데이트는 자동으로 하지 않고 `update.sh` 로만 한다.
+
+```
+$ ./functest.sh
+[버전] 현재 v1.0 — 최신은 v1.1 입니다. 구버전으로는 실행하지 않습니다.
+       ~/prodtech_inspection/update.sh 로 업데이트한 뒤 다시 실행하세요.
+$ ./update.sh
+현재 버전 : prodtech_inspection v1.0
+최신 버전 : v1.1
+v1.0 → v1.1 변경 내역:
+  - ...
+완료: prodtech_inspection v1.1
+```
+
+```bash
+./update.sh            # 최신 태그로 업데이트
+./update.sh --check    # 최신 여부만 확인 (최신이면 exit 0, 아니면 1)
+```
+
+| 상황 | 동작 |
+|---|---|
+| 최신 태그 이상 (태그 이후 개발 커밋 포함) | 그대로 실행 |
+| 최신 태그보다 낮음 | **실행 거부** → `./update.sh` 안내 |
+| GitHub 확인 실패 (오프라인 등, 5초 제한) | 경고만 찍고 현재 버전으로 실행 |
+| `.git` 없음 (scp 로 복사한 사본) | 경고만 찍고 실행 |
+| `--skip-version-check` / `PI_SKIP_VERSION_CHECK=1` | 확인 생략 — 버그 버전이 배포됐을 때의 긴급 우회, 현장 수정 클론용 |
+| `functest.sh` 가 부르는 `inspect.sh` / `run-burnin.sh` | 다시 확인하지 않음 (최상위에서 한 번만) |
+
+`update.sh` 가 업데이트하지 않고 멈추는 경우:
+
+| 상황 | 이유 / 조치 |
+|---|---|
+| 수정된 파일이 있음 (`-dirty`) | 덮어쓰면 현장 수정분이 사라진다. 필요 없으면 `git checkout -- .` 후 재실행 |
+| `run-burnin` / `functest` / `inspect` / `setup` 실행 중 | 돌고 있는 스크립트의 파일을 바꾸지 않는다. 끝난 뒤 재실행 |
+| 이 폴더에만 있는 커밋이 있음 | fast-forward 불가. 현장 수정 클론이면 `--skip-version-check` 로 쓰거나 새로 clone |
+| GitHub 접근 실패 | 네트워크 확인 |
+
+비교 기준은 main 이 아니라 **태그**다. main 에 커밋을 push 해도 현장 SSD 는 막히지 않고,
+태그를 달아 push 해야 비로소 "새 버전" 이 된다.
+
 **릴리스 절차** — 브랜치는 `main` 하나로 쓰고, 배포할 때 태그만 단다.
+태그를 push 하는 순간 모든 검수 SSD 의 구버전 사본이 실행을 거부하므로, 태그 전에 서버에서 한 번 돌려본다.
 
 ```bash
 echo 1.1 > VERSION
@@ -489,6 +536,7 @@ git push origin main --tags
 | `BURN_DIR` | functest / inspect / run-burnin | (탐색) | `gadget_burn` 이 있는 디렉터리(또는 실행파일 경로). 없으면 `<저장소>/gadget-burn` → `<저장소>/../gadget-burn` → `~/gadget-burn` → `PATH` 순으로 찾는다 |
 | `LIB_DIR` | run-burnin | `<저장소>/lib` | `sample-sensors.sh` / `find-gadget-burn.sh` 위치 |
 | `REFRESH` | run-burnin | `2` | 대시보드 갱신 주기(초) |
+| `PI_SKIP_VERSION_CHECK` | 네 스크립트 | (없음) | `1` 이면 최신 버전 확인 생략 (`--skip-version-check` 와 같음) |
 | `NVSMI` | run-burnin | `nvidia-smi` | 대시보드용 GPU 조회 명령 (화면 렌더링 테스트용으로 바꿔 끼울 때만) |
 
 `run-burnin.sh` 는 `exec sudo` 로 자기를 재실행한다. sudo 는 환경변수를 버리지만
@@ -504,6 +552,9 @@ git push origin main --tags
 | inspect.sh | ❌ 없음 | **확인 필요(❌) 항목이 하나라도 있음** |
 | functest.sh | HW·번인 모두 정상 (번인은 --burn 일 때만) | HW 판정 ❌ 또는 번인 실패 / --time·--mem 을 --burn 없이 줌 |
 | run-burnin.sh | CSV 생성 완료 | 필수 도구 없음 / CSV 미생성 |
+| update.sh | 최신으로 업데이트됨 / 이미 최신 | 업데이트 못 함(수정 파일·실행 중·네트워크) / `--check` 에서 구버전 |
+
+네 스크립트(setup / inspect / functest / run-burnin)는 구버전이면 시작하자마자 exit 1 로 끝난다.
 
 ⚠️(건너뜀)은 실패로 세지 않는다 — 해당 하드웨어가 없거나 도구가 없어 판정을
 못 한 경우다. 여러 대를 자동으로 돌릴 때는 exit code 로 걸러 쓸 수 있다.

@@ -34,11 +34,13 @@ for a in "$@"; do
         --full) FULL=1 ;;
         -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
         --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
+        --skip-version-check) export PI_SKIP_VERSION_CHECK=1 ;;
         -*) echo "알 수 없는 옵션: $a" >&2; exit 1 ;;
         *)  BASE_DIR="$a" ;;
     esac
 done
 BASE_DIR="${BASE_DIR:-$SCRIPT_DIR}"
+pi_check_latest
 TZ_WANT="${TZ_WANT:-Asia/Seoul}"
 
 mkdir -p "$BASE_DIR" || { echo "설치 경로를 만들 수 없습니다: $BASE_DIR" >&2; exit 1; }

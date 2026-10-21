@@ -46,10 +46,12 @@ while [[ $# -gt 0 ]]; do
         --load-sec) shift; PCIE_LOAD_SEC=${1:-20} ;;
         -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
         --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
+        --skip-version-check) export PI_SKIP_VERSION_CHECK=1 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
     esac
     shift
 done
+pi_check_latest
 
 TZ_WANT="${TZ_WANT:-Asia/Seoul}"
 STAMP=$(date +%Y%m%d_%H%M%S)

@@ -61,10 +61,12 @@ while [[ $# -gt 0 ]]; do
         --no-build) DO_BUILD=0 ;;
         -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
         --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
+        --skip-version-check) export PI_SKIP_VERSION_CHECK=1 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
     esac
     shift
 done
+pi_check_latest
 # --time/--mem 은 번인에 딸린 옵션이다. --burn 없이 주면 부하를 걸 생각이었는지 모호하니 멈춘다.
 if [[ "$DO_BURN" -eq 0 && ( "$DUR" != 300 || "$MEM_LOAD" -eq 1 ) ]]; then
     echo "--time / --mem 은 --burn 과 함께 써야 합니다 (예: ./functest.sh --burn --time 600)" >&2
