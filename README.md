@@ -4,6 +4,7 @@ Manycoresoft / DEEPGadget **SW 검수** 스크립트 모음.
 
 검수 대상 장비의 서버 설정을 적용하고(`setup.sh`), 출하 전 기능을 빠르게 확인하고(`functest.sh`),
 하드웨어·설정을 검수하고(`inspect.sh`), 번인을 돌려 검수확인서에 붙일 온도 CSV를 뽑는다(`run-burnin.sh`).
+검수용 SSD 마다 clone 해 둔 사본은 `update.sh` 로 최신 버전에 맞춘다 — 구버전이면 위 스크립트들이 실행을 거부한다.
 
 ```
 prodtech_inspection/
@@ -33,6 +34,8 @@ prodtech_inspection/
 | HW 점검 | — | ✓ | ✓ (HW 부분만) | — |
 | 번인 | — | — | `--burn` 일 때만 GPU 5분 | GPU+CPU 1시간 |
 | 메모리 부하 | — | — | `--burn --mem` | — |
+
+`update.sh` 는 저장소 자체(스크립트들)만 최신 태그로 옮긴다. 서버 설정·도구는 건드리지 않는다.
 
 `inspect.sh` 에서 ❌ 가 나오면 대부분 `./setup.sh` 를 (다시) 돌리면 된다.
 
@@ -74,6 +77,60 @@ NVMe 온도(`nvme smart-log`)를 읽어야 해서 **스스로 `sudo` 로 재실�
 mkdir -p ~/검수/DG-2026-001 && cd ~/검수/DG-2026-001
 ~/prodtech_inspection/inspect.sh
 ```
+
+---
+
+## update.sh
+
+검수용 SSD 에 clone 해 둔 `prodtech_inspection` 을 **GitHub 의 최신 태그**로 업데이트한다.
+다른 스크립트가 "구버전으로는 실행하지 않습니다" 하고 멈추면 이걸 돌린 뒤 다시 실행하면 된다.
+
+```bash
+./update.sh            # 최신 태그로 업데이트
+./update.sh --check    # 최신 여부만 확인, 바꾸지 않음 (최신이면 exit 0, 아니면 1)
+./update.sh --version  # 현재 버전
+```
+
+```
+$ ./functest.sh
+[버전] 현재 v1.0 — 최신은 v1.1 입니다. 구버전으로는 실행하지 않습니다.
+       ~/prodtech_inspection/update.sh 로 업데이트한 뒤 다시 실행하세요.
+       (급하게 지금 버전으로 돌려야 하면 --skip-version-check)
+$ ./update.sh
+현재 버전 : prodtech_inspection v1.0
+최신 버전 : v1.1
+
+v1.0 → v1.1 변경 내역:
+  - v1.1: 구버전이면 실행 거부 + update.sh
+  - ...
+
+완료: prodtech_inspection v1.1
+$ ./functest.sh        # 이제 실행된다
+```
+
+**하는 일**
+
+1. `git fetch --tags origin` 으로 원격 태그를 받는다 (60초 제한)
+2. 현재 버전(가장 가까운 `v*` 태그)과 최신 태그를 비교한다 — 이미 최신이면 그대로 끝
+3. 그 사이 커밋 목록(변경 내역)을 보여준다
+4. 아래 "멈추는 경우" 를 확인한 뒤 `git merge --ff-only <최신 태그>` 로 옮긴다
+5. 새 버전을 찍고 끝낸다
+
+일반 계정(clone 한 계정)으로 실행한다. root 로 실행하면 거부한다.
+저장소 파일만 바꾸고, 서버 설정·패키지·gadget-burn 은 건드리지 않는다.
+
+**업데이트하지 않고 멈추는 경우**
+
+| 상황 | 이유 / 조치 |
+|---|---|
+| 수정된 파일이 있음 (`-dirty`) | 덮어쓰면 현장 수정분이 사라진다. 필요 없으면 `git checkout -- .` 후 재실행 |
+| `run-burnin` / `functest` / `inspect` / `setup` 실행 중 | 돌고 있는 스크립트의 파일을 바꾸지 않는다. 끝난 뒤 재실행 (다른 클론에서 돌고 있어도 멈춘다) |
+| 이 폴더에만 있는 커밋이 있음 | fast-forward 불가. 현장 수정 클론이면 `--skip-version-check` 로 쓰거나 새로 clone |
+| GitHub 접근 실패 | 네트워크 / `git remote get-url origin` 확인 |
+| `.git` 이 없음 (scp 로 복사한 사본) | 업데이트할 수 없다. 새로 clone |
+
+> **`update.sh` 가 없는 예전 사본** (v1.1 이전에 clone 한 것)은 버전 확인도 없어서 그대로 돈다.
+> 한 번만 손으로 `git -C ~/prodtech_inspection pull --ff-only` 해 두면 그다음부터는 위 흐름을 따른다.
 
 ---
 
@@ -436,6 +493,7 @@ BURN_DIR=~/x/gadget-burn ~/prodtech_inspection/lib/find-gadget-burn.sh ~/prodtec
 ## 검수 순서
 
 ```bash
+./update.sh         # 0) 검수 SSD 의 사본을 최신으로 (구버전이면 아래 스크립트가 실행을 거부한다)
 ./setup.sh          # 1) 서버 설정 + 도구 설치 (장비당 1회)
                     #    GRUB 안내가 나오면 편집 + update-grub + reboot
 ./functest.sh       # 2) 기능 테스트 — HW 다 보이는지 (부하 없음)
@@ -467,28 +525,10 @@ git clone 한 폴더에서는 `git describe` 결과가 붙어 서버의 클론�
 
 scp 로 복사해 `.git` 이 없으면 `VERSION` 값만 나온다.
 
-### 구버전이면 실행하지 않는다 → `update.sh`
+### 구버전이면 실행하지 않는다
 
-검수용 SSD 마다 clone 해 둔 사본이 오래돼도 모르고 쓰는 일을 막기 위해, 네 스크립트는 시작할 때
-GitHub 의 **최신 태그**와 비교해 **구버전이면 실행하지 않고 빠져나온다**(exit 1).
-업데이트는 자동으로 하지 않고 `update.sh` 로만 한다.
-
-```
-$ ./functest.sh
-[버전] 현재 v1.0 — 최신은 v1.1 입니다. 구버전으로는 실행하지 않습니다.
-       ~/prodtech_inspection/update.sh 로 업데이트한 뒤 다시 실행하세요.
-$ ./update.sh
-현재 버전 : prodtech_inspection v1.0
-최신 버전 : v1.1
-v1.0 → v1.1 변경 내역:
-  - ...
-완료: prodtech_inspection v1.1
-```
-
-```bash
-./update.sh            # 최신 태그로 업데이트
-./update.sh --check    # 최신 여부만 확인 (최신이면 exit 0, 아니면 1)
-```
+네 스크립트(setup / inspect / functest / run-burnin)는 시작할 때 GitHub 의 **최신 태그**와 비교해
+**구버전이면 실행하지 않고 빠져나온다**(exit 1). 업데이트는 자동으로 하지 않고 [`update.sh`](#updatesh) 로만 한다.
 
 | 상황 | 동작 |
 |---|---|
@@ -498,15 +538,6 @@ v1.0 → v1.1 변경 내역:
 | `.git` 없음 (scp 로 복사한 사본) | 경고만 찍고 실행 |
 | `--skip-version-check` / `PI_SKIP_VERSION_CHECK=1` | 확인 생략 — 버그 버전이 배포됐을 때의 긴급 우회, 현장 수정 클론용 |
 | `functest.sh` 가 부르는 `inspect.sh` / `run-burnin.sh` | 다시 확인하지 않음 (최상위에서 한 번만) |
-
-`update.sh` 가 업데이트하지 않고 멈추는 경우:
-
-| 상황 | 이유 / 조치 |
-|---|---|
-| 수정된 파일이 있음 (`-dirty`) | 덮어쓰면 현장 수정분이 사라진다. 필요 없으면 `git checkout -- .` 후 재실행 |
-| `run-burnin` / `functest` / `inspect` / `setup` 실행 중 | 돌고 있는 스크립트의 파일을 바꾸지 않는다. 끝난 뒤 재실행 |
-| 이 폴더에만 있는 커밋이 있음 | fast-forward 불가. 현장 수정 클론이면 `--skip-version-check` 로 쓰거나 새로 clone |
-| GitHub 접근 실패 | 네트워크 확인 |
 
 비교 기준은 main 이 아니라 **태그**다. main 에 커밋을 push 해도 현장 SSD 는 막히지 않고,
 태그를 달아 push 해야 비로소 "새 버전" 이 된다.
@@ -570,7 +601,10 @@ GRUB 안내는 exit code 에 반영되지 않는다. `setup.sh` 요약 뒤에 �
 
 | 증상 | 원인 / 조치 |
 |---|---|
-| `root 로 실행하지 마세요` | `setup.sh` `inspect.sh` 는 일반 계정 전용. `sudo` 를 빼고 다시 |
+| `root 로 실행하지 마세요` | `setup.sh` `inspect.sh` `update.sh` 는 일반 계정 전용. `sudo` 를 빼고 다시 |
+| `[버전] 현재 vX — 최신은 vY 입니다. 구버전으로는 실행하지 않습니다.` | `./update.sh` 후 다시 실행. 지금 버전으로 꼭 돌려야 하면 `--skip-version-check` |
+| `[버전] GitHub 에서 최신 버전을 확인하지 못했습니다` | 오프라인이거나 GitHub 접근 불가. 경고일 뿐 현재 버전으로 그대로 실행된다. 시작이 5초 늦어지는 건 이 확인 때문 |
+| `update.sh` 가 `수정된 파일이 있어 업데이트하지 않습니다` | 서버에서 파일을 고친 사본. 수정분이 필요 없으면 `git checkout -- .` 후 재실행, 필요하면 `--skip-version-check` 로 사용 |
 | `gadget_burn 을 찾을 수 없습니다` | 메시지 아래에 찾아본 경로 목록이 나온다. 이미 빌드해 둔 곳이 있으면 `--burn-dir /경로`(functest) 또는 `BURN_DIR=/경로`(inspect / run-burnin). `functest.sh` 는 둘 다 없으면 clone 해서 빌드하므로 CUDA 만 있으면 된다. inspect / run-burnin 단독이면 `./setup.sh` 로 빌드 |
 | functest 가 `[안내] CUDA 툴킷(nvcc)이 없어…` | 빌드 못 함. 드라이버가 지원하는 CUDA 버전 이하의 툴킷을 설치한 뒤 재실행. 빌드본이 있으면 `--no-build` 로 그대로 진행 가능 |
 | 번인 시작 직후 `gadget_burn.log` 가 `invalid option -- 'o'` | 2026-09 이전 gadget-burn(release 1.0). 스크립트가 `-h` 로 미리 판별해 `-o` 없이 돌리므로 번인은 되지만 TFLOPS/Peak 는 안 나온다. `git -C <gadget-burn> pull --ff-only && make -C <gadget-burn>` 으로 갱신 |
