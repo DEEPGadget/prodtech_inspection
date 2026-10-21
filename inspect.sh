@@ -448,6 +448,10 @@ if have lspci; then
     elif [[ "$PCIE_BAD" -gt 0 ]]; then
         warn "링크 폭이 LnkCap 보다 낮은 장치 ${PCIE_BAD}개"
         record FAIL "PCIe 연결 상태" "폭 축소 ${PCIE_BAD}개 / 속도 낮음 ${PCIE_SLOW}개 — 슬롯·라이저·상위 브리지 확인"
+    elif [[ "$PCIE_LOAD" -eq 0 ]]; then
+        # --no-load 로 일부러 부하를 안 건 경우(functest). 유휴 Gen1 은 정상이라 속도는 판정하지 않는다.
+        warn "--no-load: 유휴 상태 측정이라 속도는 판정하지 않습니다 (속도 낮음 ${PCIE_SLOW}개, 폭은 모두 정상)"
+        record SKIP "PCIe 연결 상태" "폭 정상 / 속도는 --no-load 라 판정 생략(${PCIE_SLOW}개) — 속도까지 보려면 ./inspect.sh"
     elif [[ "$PCIE_LOADED" -eq 0 ]]; then
         # 부하를 못 걸었으면 GPU 는 유휴 Gen1(2.5GT/s)로 내려가 있는 게 정상이다.
         # 하드웨어 불량이 아니라 측정 조건이 안 갖춰진 것이므로 그렇게 적는다.

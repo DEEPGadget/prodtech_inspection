@@ -9,7 +9,7 @@ Manycoresoft / DEEPGadget **SW 검수** 스크립트 모음.
 prodtech_inspection/
 ├── setup.sh              # 서버 설정 + 도구 설치     ← 값을 바꾸는 건 여기뿐
 ├── inspect.sh            # 검수 (읽기 전용)          ← 확인만, 아무것도 안 바꿈
-├── functest.sh           # 기능 테스트 (GPU ECC/topo/NVLink + HW 정보 + GPU 5분 번인)
+├── functest.sh           # 기능 테스트 (GPU ECC/topo/NVLink + HW 정보, --burn 이면 + GPU 5분 번인)
 ├── run-burnin.sh         # 1시간 번인 + 온도 CSV
 └── lib/
     ├── sample-sensors.sh    # GPU/CPU/NVMe 온도를 CSV 로 직접 기록
@@ -25,8 +25,8 @@ prodtech_inspection/
 | 서버 설정 | **적용** | 확인만 | 안 함 | 안 함 |
 | 도구 설치·빌드 | 함 | 안 함 | 안 함 | 안 함 |
 | HW 점검 | — | ✓ | ✓ (HW 부분만) | — |
-| 번인 | — | — | GPU+CPU 5분 | GPU+CPU 1시간 |
-| 메모리 부하 | — | — | `--mem` | — |
+| 번인 | — | — | `--burn` 일 때만 GPU 5분 | GPU+CPU 1시간 |
+| 메모리 부하 | — | — | `--burn --mem` | — |
 
 `inspect.sh` 에서 ❌ 가 나오면 대부분 `./setup.sh` 를 (다시) 돌리면 된다.
 
@@ -49,7 +49,8 @@ git clone https://github.com/DEEPGadget/prodtech_inspection.git
 cd prodtech_inspection
 
 ./setup.sh          # 1회. 서버 설정 + 도구 설치 (make 로그가 길다)
-./functest.sh       # 기능 테스트 — GPU 상태 + HW 정보 + GPU 5분 번인
+./functest.sh       # 기능 테스트 — GPU 상태 + HW 정보 (GPU 부하 없음)
+./functest.sh --burn  # + GPU 5분 번인 (보조전원 연결 확인 후)
 ./inspect.sh        # 검수 — 읽기 전용
 ./run-burnin.sh     # 1시간 번인 → CSV
 ```
@@ -126,15 +127,21 @@ mkdir -p ~/검수/DG-2026-001 && cd ~/검수/DG-2026-001
 GPU 의 ECC/NVLink 가 깨끗한지, GPU 가 부하를 받는지만 짧게 본다.
 
 ```bash
-./functest.sh              # GPU 상태 + HW 정보 + GPU 5분 번인
-./functest.sh --mem        # + 메모리 부하 (전체 RAM 의 80%)
-./functest.sh --mem 30%    # 부하량 지정 (% 또는 4G / 512M)
-./functest.sh --time 600   # 번인 시간(초)
-./functest.sh --interval 2 # 온도 샘플 간격(초, 기본 5)
-./functest.sh --no-hw      # HW 정보 생략 (GPU 상태 + 번인)
+./functest.sh                     # GPU 상태 + HW 정보 (GPU 부하 없음 — 기본)
+./functest.sh --burn              # + GPU 5분 번인
+./functest.sh --burn --mem        # + 메모리 부하 (전체 RAM 의 80%)
+./functest.sh --burn --mem 30%    # 부하량 지정 (% 또는 4G / 512M)
+./functest.sh --burn --time 600   # 번인 시간(초)
+./functest.sh --burn --interval 2 # 온도 샘플 간격(초, 기본 5)
+./functest.sh --no-hw             # HW 정보 생략
 ./functest.sh --no-build   # make clean && make 생략 (있는 바이너리 그대로)
 ./functest.sh --burn-dir ~/x/gadget-burn   # gadget-burn 소스/빌드 디렉터리를 직접 지정
 ```
+
+**기본은 GPU 에 부하를 전혀 걸지 않는다.** 보조전원 플러그를 다 꽂지 않은 채 부팅하는
+경우가 있어서, 번인(4단계)과 그 준비(1단계: clone/빌드)는 `--burn` 을 줬을 때만 돈다.
+HW 단계도 `inspect.sh --no-load` 로 불러 PCIe 측정용 부하를 걸지 않는다(폭만 판정, 속도는 SKIP).
+`--time` / `--mem` 은 번인 옵션이라 `--burn` 없이 주면 멈춘다.
 
 **1단계: gadget-burn 준비.** 소스 디렉터리를 `--burn-dir` → `<저장소>/gadget-burn` →
 `~/gadget-burn` 순으로 찾고, **둘 다 없으면 `<저장소>/gadget-burn` 에 clone** 한다
@@ -149,47 +156,47 @@ CUDA 쪽 문제는 **안내만 하고 고치지 않는다**(설치·변경 없�
 | nvcc 없음 | 빌드 건너뜀 + 드라이버가 지원하는 CUDA 버전 안내. 빌드본이 있으면 그걸로 진행 |
 | nvcc 가 드라이버 지원 CUDA 보다 높음 | 경고 후 빌드 시도 (실행 시 `driver version is insufficient` 가능성 안내) |
 | 빌드 실패 (`Unsupported gpu architecture`, `-lnvidia-ml`, cuBLAS 등) | 원인별 안내. `make clean` 전에 보관해 둔 **기존 바이너리를 되돌려** 진행 |
-| 빌드본도 없음 | 번인 불가 → 종료(exit 1). HW 수집은 들어가지 않는다 |
+| 빌드본도 없음 | 번인 불가 → 종료(exit 1). HW 수집은 들어가지 않는다 (`--burn` 일 때만 해당) |
 
 빌드 로그는 `functest_<host>_<시각>/gadget-burn-build.log`, clone 로그는 `gadget-burn-clone.log`.
 빌드된 `gadget_burn` 은 세 스크립트(`functest.sh` `inspect.sh` `run-burnin.sh`)가
 `lib/find-gadget-burn.sh` 로 같은 순서(`BURN_DIR` → `<저장소>/gadget-burn` →
 `<저장소>/../gadget-burn` → `~/gadget-burn` → `PATH`)로 찾는다.
 
-1. **gadget-burn 준비** — 위 참고 (찾기 → 없으면 clone → make clean && make)
+1. **gadget-burn 준비** — 위 참고 (찾기 → 없으면 clone → make clean && make). `--burn` 일 때만
 2. **GPU 상태 (ECC / topo / NVLink)** — 번인 전에 아래를 `gpu/` 에 저장하고 화면에 표로 찍는다.
    설정은 바꾸지 않는다.
    - **GPU 목록**: `nvidia-smi --query-gpu` 한 번으로 GPU 별 이름·S/N·UUID·BDF·VBIOS·온도·
      PCIe gen/폭(current/max)·ECC uncorrected aggregate 를 한 줄씩 (`gpu/gpu_list.csv`).
      PCIe gen current 는 idle 이면 낮게 나오므로 판정하지 않지만, 폭(width)은 idle 에도 유지되므로
-     **current < max 면 확인 필요**(슬롯/라이저 의심). 부하 중 속도 판정은 HW 정보 단계가 한다.
+     **current < max 면 확인 필요**(슬롯/라이저 의심). 부하 중 속도 판정은 `./inspect.sh` 가 한다.
    - **ECC**: GPU 별 ECC 모드, corrected/uncorrected (volatile·aggregate), row remapping
      (Ampere 이후; 없으면 retired pages). **uncorrected > 0 이거나 remap uncorrectable /
      pending / failure > 0 이면 확인 필요**. ECC 미지원·Disabled(`[N/A]`) 카드는 표시만 한다.
-     번인이 끝나면 한 번 더 읽어 **번인 전후 늘어난 카운터**를 GPU 별로 보여준다.
+     `--burn` 이면 번인이 끝난 뒤 한 번 더 읽어 **번인 전후 늘어난 카운터**를 GPU 별로 보여준다.
    - **topo**: `nvidia-smi topo -m` 매트릭스를 그대로 출력하고(범례는 `gpu/topo.txt`)
      NVLink(`NV#`)로 묶인 GPU 쌍 수를 요약한다.
    - **NVLink**: `nvidia-smi nvlink -s` 로 GPU 별 active/inactive 링크 수, `nvlink -e` 로
      에러 카운터(Replay/Recovery/CRC)를 본다. Link 줄이 하나도 없으면(5090 처럼 NVLink 가
      없거나 브리지 미장착) 건너뛴다. **한 GPU 에 active/inactive 가 섞이거나, GPU 마다 active
      수가 다르거나, 에러 카운터가 0 이 아니면 확인 필요** (브리지 장착/접촉 의심).
-3. **HW 정보** — `inspect.sh --hw-only` 를 그대로 쓴다(PART 1만, 서버 설정은 안 봄).
-   gadget_burn 을 먼저 띄워 20초 뒤 수집하므로 GPU PCIe 링크가 최대 속도로 찍힌다.
+3. **HW 정보** — `inspect.sh --hw-only --no-load` 를 쓴다(PART 1만, 서버 설정은 안 봄).
+   GPU 부하를 걸지 않으므로 PCIe 는 폭만 판정하고 속도는 SKIP 으로 남긴다.
    끝에 **하드웨어 구성 요약**(CPU 모델/수량/S/N, 메인보드 모델/S/N, RAM 제조사·단품
    용량·속도·수량·총 용량, 스토리지·PCIe 디바이스의 구분/모델/S/N)을 `hw/hw_summary.txt`
    로 남기고, functest 가 끝날 때 다시 출력한다
-4. **GPU 번인** — `run-burnin.sh --no-cpu` 를 5분으로 호출. CPU stress 는 걸지 않고
+4. **GPU 번인** — `--burn` 일 때만. `run-burnin.sh --no-cpu` 를 5분(`--time`)으로 호출. CPU stress 는 걸지 않고
    GPU 만 돌리며, CPU 온도는 CSV 에 그대로 기록된다 (1시간 검수 번인은 CPU 도 같이 돈다)
-5. **메모리 부하**(옵션) — `stress --vm` 을 번인과 겹쳐서 건다
+5. **메모리 부하**(옵션) — `--burn --mem` 이면 `stress --vm` 을 번인과 겹쳐서 건다
 
 GPU 상태 판정에 걸린 항목이 있으면 요약의 `GPU 판정` 에 표시되고 종료 코드가 1 이 된다.
 
 ```
 functest_<host>_<시각>/
-├── gadget-burn-build.log  make clean && make 출력 (clone 했으면 gadget-burn-clone.log 도)
-├── gpu/                   gpu_list.csv / ecc_before.csv / ecc_after.csv / topo.txt / nvlink_status.txt / nvlink_errors.txt
+├── gadget-burn-build.log  make clean && make 출력 (clone 했으면 gadget-burn-clone.log 도) — --burn 인 경우
+├── gpu/                   gpu_list.csv / ecc_before.csv / ecc_after.csv(--burn) / topo.txt / nvlink_status.txt / nvlink_errors.txt
 ├── hw/                    inspect.log / serials.csv / hw_summary.txt / raw/
-├── burnin_<host>_<시각>/  온도 CSV, gadget_burn 로그 등
+├── burnin_<host>_<시각>/  온도 CSV, gadget_burn 로그 등 — --burn 인 경우
 └── stress-mem.log         --mem 을 준 경우
 ```
 
@@ -239,9 +246,10 @@ NVIDIA GPU 는 유휴일 때 링크를 Gen1 으로 내린다. 그 상태로 읽�
 
 그래서 `inspect.sh` 는 sudo 확인 직후, 원본 덤프와 PART 1 하드웨어 수집에 들어가기
 **전에** `gadget_burn` 을 백그라운드로 띄우고 20초(`--load-sec`) 기다린다. 그 상태로
-`lspci -vvv` 덤프와 PCIe 항목을 읽고, PCIe 항목이 끝나면 바로 부하를 내린다
-(`functest.sh` 의 HW 단계도 같다). 부하를 걸었을 때만 속도까지 합격 판정하고,
-못 걸었으면 "속도 판정 불가" 로 남긴다.
+`lspci -vvv` 덤프와 PCIe 항목을 읽고, PCIe 항목이 끝나면 바로 부하를 내린다.
+부하를 걸었을 때만 속도까지 합격 판정하고, 못 걸었으면 "속도 판정 불가" 로 남긴다.
+`--no-load` 로 일부러 안 걸면(`functest.sh` 의 HW 단계가 이렇게 부른다) 폭만 판정하고
+속도는 SKIP 으로 남긴다.
 
 ### 구성품 S/N
 
@@ -385,13 +393,14 @@ GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_Throttle
 ```bash
 ./setup.sh          # 1) 서버 설정 + 도구 설치 (장비당 1회)
                     #    GRUB 안내가 나오면 편집 + update-grub + reboot
-./functest.sh       # 2) 기능 테스트 — HW 다 보이는지 + 5분 부하
+./functest.sh       # 2) 기능 테스트 — HW 다 보이는지 (부하 없음)
+./functest.sh --burn  #    전원 연결 확인 후 5분 부하
 ./inspect.sh        # 3) 검수 → inspect_<host>_<시각>/
                     #    ❌ 가 있으면 조치 후 다시 ./inspect.sh
 ./run-burnin.sh     # 4) 1시간 번인 → CSV 를 검수확인서에 첨부
 ```
 
-`run-burnin.sh` 는 `functest.sh` 가 5분짜리로 부르는 것과 같은 스크립트다.
+`run-burnin.sh` 는 `functest.sh --burn` 이 5분짜리로 부르는 것과 같은 스크립트다.
 1시간 번인은 검수확인서에 붙일 CSV 를 뽑는 단계이므로 따로 한 번 더 돌린다.
 
 ---
@@ -422,7 +431,7 @@ GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_Throttle
 |---|---|---|
 | setup.sh | 실패 항목 없음 | 실패(❌) 항목이 있거나, 실행 자체가 막힘(root 실행 / sudo 실패) |
 | inspect.sh | ❌ 없음 | **확인 필요(❌) 항목이 하나라도 있음** |
-| functest.sh | HW·번인 모두 정상 | HW 판정 ❌ 또는 번인 실패 |
+| functest.sh | HW·번인 모두 정상 (번인은 --burn 일 때만) | HW 판정 ❌ 또는 번인 실패 / --time·--mem 을 --burn 없이 줌 |
 | run-burnin.sh | CSV 생성 완료 | 필수 도구 없음 / CSV 미생성 |
 
 ⚠️(건너뜀)은 실패로 세지 않는다 — 해당 하드웨어가 없거나 도구가 없어 판정을
@@ -444,7 +453,7 @@ GRUB 안내는 exit code 에 반영되지 않는다. `setup.sh` 요약 뒤에 �
 | functest 가 `[안내] CUDA 툴킷(nvcc)이 없어…` | 빌드 못 함. 드라이버가 지원하는 CUDA 버전 이하의 툴킷을 설치한 뒤 재실행. 빌드본이 있으면 `--no-build` 로 그대로 진행 가능 |
 | 번인 시작 직후 `gadget_burn.log` 가 `invalid option -- 'o'` | 2026-09 이전 gadget-burn(release 1.0). 스크립트가 `-h` 로 미리 판별해 `-o` 없이 돌리므로 번인은 되지만 TFLOPS/Peak 는 안 나온다. `git -C <gadget-burn> pull --ff-only && make -C <gadget-burn>` 으로 갱신 |
 | `Could not get lock /var/lib/dpkg/lock` | 자동 업데이트 타이머가 먼저 깨어난 것. `./setup.sh` 를 다시 돌리면 맨 앞에서 차단하고 진행한다 |
-| GPU 가 `Speed 2.5GT/s (downgraded)` | 유휴 상태로 읽힌 것. `--no-load` 를 뺐는지 확인 (기본은 부하를 건다) |
+| GPU 가 `Speed 2.5GT/s (downgraded)` | 유휴 상태로 읽힌 것. `inspect.sh` 는 `--no-load` 를 뺐는지 확인 (기본은 부하를 건다). `functest.sh` 는 원래 부하 없이 재므로 속도는 SKIP |
 | 온보드 NIC 이 `Width x4` 로 ❌ | 설계상 x4 인 보드가 많다(예: MS73-HB2 의 BCM57416). 슬롯 카드가 아니면 상위 브리지의 `LnkSta` 를 보고 판단한다 |
 | GRUB 항목만 계속 ❌ | `setup.sh` 는 grub 을 자동 편집하지 않는다. 안내대로 편집 → `sudo update-grub` → **재부팅** |
 | `ipmitool` 없음 → PSU ⚠️ | `./setup.sh` 로 설치. 건너뜀이라 검수는 계속된다 |
