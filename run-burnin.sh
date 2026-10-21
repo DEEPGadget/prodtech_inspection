@@ -4,15 +4,15 @@
 #
 #   1) gadget-burn/gadget_burn                                   (GPU 번인)
 #   2) stress -c <코어수>                                         (CPU 번인)
-#   3) lib/gpu-cpu.sh <interval> <duration>                       (온도 로깅)
+#   3) lib/sample-sensors.sh <interval> <duration> <csv>          (온도 로깅 → CSV 직접 기록)
 #   위 3개를 동시에 실행하고, 현재 GPU/CPU 온도와 GPU 쓰로틀 상태를
-#   터미널에 실시간 갱신 표시한다. 종료 후 make-csv.sh 로 CSV를 생성한다.
+#   터미널에 실시간 갱신 표시한다.
 #
 # 사용법:  ./run-burnin.sh [지속시간(초)] [샘플간격(초)] [--no-cpu]
 #          기본값: 3600 5
 #          --no-cpu : CPU 번인(stress)을 빼고 GPU 번인 + 온도 로깅만 (functest.sh 가 쓴다)
 #
-# gpu-cpu.sh 내부의 `sudo nvme smart-log` 때문에 root 권한이 필요하다.
+# sample-sensors.sh 의 `nvme smart-log` 때문에 root 권한이 필요하다.
 # 일반 계정으로 실행하면 sudo 로 한 번만 승격한 뒤 그대로 이어서 진행한다.
 
 set -uo pipefail
@@ -22,7 +22,7 @@ DO_CPU=1; POS=()
 for a in "$@"; do
   case "$a" in
     --no-cpu) DO_CPU=0 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     -*) echo "알 수 없는 옵션: $a" >&2; exit 1 ;;
     *) POS+=("$a") ;;
   esac

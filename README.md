@@ -2,8 +2,8 @@
 
 Manycoresoft / DEEPGadget **SW 검수** 스크립트 모음.
 
-검수 대상 장비의 서버 설정을 적용하고(`setup.sh`), 하드웨어를 점검하고(`inspect.sh`),
-번인을 돌려 검수확인서에 붙일 온도 CSV를 뽑는다(`run-burnin.sh`).
+검수 대상 장비의 서버 설정을 적용하고(`setup.sh`), 출하 전 기능을 빠르게 확인하고(`functest.sh`),
+하드웨어·설정을 검수하고(`inspect.sh`), 번인을 돌려 검수확인서에 붙일 온도 CSV를 뽑는다(`run-burnin.sh`).
 
 ```
 prodtech_inspection/
@@ -15,6 +15,8 @@ prodtech_inspection/
     ├── sample-sensors.sh    # GPU/CPU/NVMe 온도를 CSV 로 직접 기록
     └── find-gadget-burn.sh  # gadget_burn 탐색 (세 스크립트가 같이 씀)
 ```
+
+모든 스크립트는 `-h` / `--help` 로 사용법을 찍는다 (`lib/` 스크립트는 인자 없이 부르면 사용법이 나온다).
 
 구 `Check_server_information` 과 `setup_tools.sh` 를 대체한다. 이 저장소 하나면 된다.
 
@@ -315,9 +317,12 @@ GPU 번인, CPU 번인, 온도 로깅 **3개를 동시에** 돌리고 CSV까지 
 `--no-cpu` 를 주면 CPU 번인(stress)을 빼고 GPU 번인 + 온도 로깅만 한다(`functest.sh` 가 쓴다).
 
 ```bash
-./run-burnin.sh          # 3600초 / 5초 샘플 (기본값)
-./run-burnin.sh 1800 5   # 30분
+./run-burnin.sh                  # 3600초 / 5초 샘플 (기본값)
+./run-burnin.sh 1800 5           # 30분
+./run-burnin.sh 300 5 --no-cpu   # 5분, GPU 번인 + 온도 로깅만 (functest.sh --burn 이 이렇게 부른다)
 ```
+
+인자는 `[지속시간(초)] [샘플간격(초)] [--no-cpu]` 순서다. 위치 인자와 `--no-cpu` 는 섞어 줘도 된다.
 
 - `gadget_burn -t <초>` — GPU 번인
 - `stress -c $(nproc) -t <초>` — CPU 번인
@@ -388,6 +393,41 @@ GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_Throttle
 
 ---
 
+## lib/
+
+위 스크립트들이 내부에서 부르는 보조 스크립트. 평소에는 직접 실행할 일이 없지만
+문제를 좁힐 때 단독으로 돌려볼 수 있다.
+
+### lib/sample-sensors.sh
+
+GPU / CPU / NVMe 온도(와 GPU 전력·사용률·쓰로틀)를 일정 간격으로 읽어 **CSV 로 바로** 쓴다.
+`run-burnin.sh` 가 번인과 함께 띄우는 온도 로거다. 부하는 걸지 않는다.
+
+```bash
+sudo ~/prodtech_inspection/lib/sample-sensors.sh 5 600 /tmp/temps.csv   # 5초 간격, 10분
+```
+
+- 인자: `<간격(초)> <지속(초)> <출력.csv>` — 셋 다 필수
+- NVMe 온도(`nvme smart-log`) 때문에 root 가 필요하다. 일반 계정이면 NVMe 칼럼은 생기지만 값이 빈다
+- CSV 형식은 [run-burnin.sh](#run-burninsh) 의 CSV 와 같다 (GPU 는 PCI address 로 구분)
+
+### lib/find-gadget-burn.sh
+
+`gadget_burn` 실행파일을 찾아 절대경로를 stdout 에 한 줄 찍는다.
+`functest.sh` / `inspect.sh` / `run-burnin.sh` 가 같은 순서로 찾도록 한 곳에 모은 것이다.
+
+```bash
+~/prodtech_inspection/lib/find-gadget-burn.sh ~/prodtech_inspection          # 어떤 바이너리를 쓰게 될지 확인
+BURN_DIR=~/x/gadget-burn ~/prodtech_inspection/lib/find-gadget-burn.sh ~/prodtech_inspection
+```
+
+- 인자: `<저장소 경로> [사용자 홈]` (홈은 sudo 로 재실행된 경우를 위해 원래 사용자 홈을 넘긴다)
+- 찾는 순서: `BURN_DIR` → `<저장소>/gadget-burn` → `<저장소>/../gadget-burn` → `<홈>/gadget-burn`
+  → `PATH` / `<홈>/.local/bin` / `/usr/local/bin`
+- 종료 코드: `0` 찾음 (stdout 에 경로) / `1` 못 찾음 (stderr 에 찾아본 위치와 조치 안내)
+
+---
+
 ## 검수 순서
 
 ```bash
@@ -412,16 +452,18 @@ GPU0_0000:c1:00.0_Util(%),GPU0_0000:c1:00.0_Throttle
 | 변수 | 쓰는 곳 | 기본값 | 용도 |
 |---|---|---|---|
 | `TZ_WANT` | setup / inspect | `Asia/Seoul` | 적용·판정할 타임존 |
-| `CUDA_HOME` | setup | `/usr/local/cuda` | CUDA 를 다른 곳에 깐 경우 |
+| `CUDA_HOME` | setup / functest / inspect | `/usr/local/cuda` | CUDA 를 다른 곳에 깐 경우 (nvcc 탐색) |
+| `GB_URL` | functest | `https://github.com/DEEPGadget/gadget-burn.git` | `--burn` 인데 gadget-burn 소스가 없을 때 clone 할 주소 |
 | `PCIE_LOAD_SEC` | inspect | `20` | `--load-sec` 와 같음 — 부하를 건 뒤 HW 수집 시작까지 대기(초) |
 | `OUTDIR` | inspect | `inspect_<host>_<시각>` | 결과 폴더 지정 (`functest.sh` 가 쓴다) |
 | `OUT_ROOT` | run-burnin | 실행한 디렉터리 | `burnin_*` 를 만들 상위 경로 |
 | `BURN_DIR` | functest / inspect / run-burnin | (탐색) | `gadget_burn` 이 있는 디렉터리(또는 실행파일 경로). 없으면 `<저장소>/gadget-burn` → `<저장소>/../gadget-burn` → `~/gadget-burn` → `PATH` 순으로 찾는다 |
 | `LIB_DIR` | run-burnin | `<저장소>/lib` | `sample-sensors.sh` / `find-gadget-burn.sh` 위치 |
 | `REFRESH` | run-burnin | `2` | 대시보드 갱신 주기(초) |
+| `NVSMI` | run-burnin | `nvidia-smi` | 대시보드용 GPU 조회 명령 (화면 렌더링 테스트용으로 바꿔 끼울 때만) |
 
 `run-burnin.sh` 는 `exec sudo` 로 자기를 재실행한다. sudo 는 환경변수를 버리지만
-위 표의 `BURN_DIR` `LIB_DIR` `OUT_ROOT` `REFRESH` 는 스크립트가 `env` 로 직접 넘기므로
+위 표의 `BURN_DIR` `LIB_DIR` `OUT_ROOT` `REFRESH` `NVSMI` 는 스크립트가 `env` 로 직접 넘기므로
 `BURN_DIR=~/gadget-burn ./run-burnin.sh` 처럼 앞에 붙이면 된다. 그 밖의 변수는
 넘어가지 않는다.
 
