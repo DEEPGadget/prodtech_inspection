@@ -26,12 +26,14 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
 fi
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$SCRIPT_DIR/lib/version.sh"
 FULL=0
 BASE_DIR=""
 for a in "$@"; do
     case "$a" in
         --full) FULL=1 ;;
         -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
         -*) echo "알 수 없는 옵션: $a" >&2; exit 1 ;;
         *)  BASE_DIR="$a" ;;
     esac
@@ -79,6 +81,7 @@ clone_repo() {   # clone_repo <url> <name>
 printf '\033[1;36m'
 hr; printf '  DEEPGadget SW 검수 · 설정 + 도구 설치  —  %s\n' "$(hostname)"; hr
 printf '\033[0m'
+printf '   버전      : prodtech_inspection %s\n' "$PI_VERSION"
 printf '   설치 경로 : %s\n' "$BASE_DIR"
 printf '   모드      : %s\n' "$([ "$FULL" -eq 1 ] && echo '--full (벤치마크 도구 포함)' || echo '기본 (검수/번인 도구)')"
 printf '   결과경로  : %s\n' "$OUTDIR"
@@ -459,7 +462,7 @@ print_group() {
     return "$count"
 }
 
-printf '\n\033[1;34m'; hr; printf '  setup 결과 요약  —  %s\n' "$(hostname)"; hr; printf '\033[0m'
+printf '\n\033[1;34m'; hr; printf '  setup 결과 요약  —  %s  ·  prodtech_inspection %s\n' "$(hostname)" "$PI_VERSION"; hr; printf '\033[0m'
 print_group OK   "✅ 잘 된 것"    32 || OK_COUNT=$?
 print_group FAIL "❌ 잘 안 된 것" 31 || FAIL_COUNT=$?
 print_group SKIP "⚠️  건너뛴 것"  33 || SKIP_COUNT=$?

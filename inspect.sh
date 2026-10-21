@@ -31,6 +31,9 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     exit 1
 fi
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$SCRIPT_DIR/lib/version.sh"
+
 # --check 는 예전 옵션. 이제 항상 읽기 전용이라 받아만 주고 무시한다.
 PCIE_LOAD=1
 HW_ONLY=0
@@ -42,12 +45,12 @@ while [[ $# -gt 0 ]]; do
         --hw-only) HW_ONLY=1 ;;
         --load-sec) shift; PCIE_LOAD_SEC=${1:-20} ;;
         -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+        --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
     esac
     shift
 done
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 TZ_WANT="${TZ_WANT:-Asia/Seoul}"
 STAMP=$(date +%Y%m%d_%H%M%S)
 OUTDIR="${OUTDIR:-$PWD/inspect_$(hostname)_${STAMP}}"
@@ -93,7 +96,7 @@ print_group() {
 
 # print_summary <제목>  —  --hw-only 로 중간에 끝낼 때도 같은 형식으로 낸다
 print_summary() {
-    printf '\n\033[1;34m'; hr; printf '  %s  —  %s\n' "$1" "$(hostname)"; hr; printf '\033[0m'
+    printf '\n\033[1;34m'; hr; printf '  %s  —  %s  ·  prodtech_inspection %s\n' "$1" "$(hostname)" "$PI_VERSION"; hr; printf '\033[0m'
     OK_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
     print_group OK   "✅ 정상"      32 || OK_COUNT=$?
     print_group FAIL "❌ 확인 필요" 31 || FAIL_COUNT=$?
@@ -141,6 +144,7 @@ cat <<'BANNER'
 BANNER
 printf '\033[0m'
 kv "호스트" "$(hostname)"
+kv "버전"   "prodtech_inspection $PI_VERSION"
 kv "일시"   "$(date '+%Y-%m-%d %H:%M:%S %Z')"
 kv "OS"     "$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME") / kernel $(uname -r)"
 kv "모드"   "읽기 전용 — 설정은 바꾸지 않습니다 (변경은 ./setup.sh)"

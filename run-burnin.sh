@@ -17,12 +17,16 @@
 
 set -uo pipefail
 
+# 버전은 sudo 재실행 전에(원래 사용자로) 계산해 PI_VERSION 으로 넘긴다 — lib/version.sh 참고
+source "$(dirname "$0")/lib/version.sh"
+
 # 위치 인자(지속시간, 샘플간격)와 옵션(--no-cpu)을 섞어 받는다. sudo 재실행 시 "$@" 그대로 넘어간다.
 DO_CPU=1; POS=()
 for a in "$@"; do
   case "$a" in
     --no-cpu) DO_CPU=0 ;;
     -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
     -*) echo "알 수 없는 옵션: $a" >&2; exit 1 ;;
     *) POS+=("$a") ;;
   esac
@@ -38,7 +42,7 @@ if [ "$(id -u)" -ne 0 ]; then
   # sudo 는 환경변수를 버리므로 이 스크립트가 보는 설정값만 env 로 명시해서 넘긴다
   # (sudoers 의 env_keep 설정과 무관하게 동작한다)
   PASS=()
-  for v in BURN_DIR LIB_DIR OUT_ROOT REFRESH NVSMI; do
+  for v in BURN_DIR LIB_DIR OUT_ROOT REFRESH NVSMI PI_VERSION; do
     [ -n "${!v:-}" ] && PASS+=("$v=${!v}")
   done
   exec sudo -- env ${PASS[@]+"${PASS[@]}"} "$0" "$@"
@@ -134,6 +138,7 @@ RULE="────────────────────────�
 
 echo "$RULE"
 echo " ${C_C}DEEPGadget SW 검수 번인${C_RST}  —  $HOSTN"
+echo "   버전     : prodtech_inspection $PI_VERSION"
 echo "   지속시간 : $DUR 초 ($(hms "$DUR"))     로그 샘플간격 : ${INTERVAL}s"
 if [ "$DO_CPU" -eq 1 ]; then echo "   CPU      : ${NCPU} threads   (stress -c $NCPU -t $DUR)"
 else                        echo "   CPU      : 부하 없음 (--no-cpu) — 온도만 기록"; fi
@@ -155,6 +160,7 @@ fi
 echo "$RULE"
 
 {
+  echo "### version";    echo "prodtech_inspection $PI_VERSION"
   echo "### date";       date
   echo "### hostname";   hostname
   echo "### uname";      uname -a

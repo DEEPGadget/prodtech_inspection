@@ -11,12 +11,15 @@ prodtech_inspection/
 ├── inspect.sh            # 검수 (읽기 전용)          ← 확인만, 아무것도 안 바꿈
 ├── functest.sh           # 기능 테스트 (GPU ECC/topo/NVLink + HW 정보, --burn 이면 + GPU 5분 번인)
 ├── run-burnin.sh         # 1시간 번인 + 온도 CSV
+├── VERSION               # 현재 버전 (1.0)
 └── lib/
     ├── sample-sensors.sh    # GPU/CPU/NVMe 온도를 CSV 로 직접 기록
-    └── find-gadget-burn.sh  # gadget_burn 탐색 (세 스크립트가 같이 씀)
+    ├── find-gadget-burn.sh  # gadget_burn 탐색 (세 스크립트가 같이 씀)
+    └── version.sh           # 버전 문자열 (네 스크립트가 같이 씀)
 ```
 
-모든 스크립트는 `-h` / `--help` 로 사용법을 찍는다 (`lib/` 스크립트는 인자 없이 부르면 사용법이 나온다).
+모든 스크립트는 `-h` / `--help` 로 사용법을, `--version` 으로 버전을 찍는다
+(`lib/` 스크립트는 인자 없이 부르면 사용법이 나온다).
 
 구 `Check_server_information` 과 `setup_tools.sh` 를 대체한다. 이 저장소 하나면 된다.
 
@@ -444,6 +447,32 @@ BURN_DIR=~/x/gadget-burn ~/prodtech_inspection/lib/find-gadget-burn.sh ~/prodtec
 1시간 번인은 검수확인서에 붙일 CSV 를 뽑는 단계이므로 따로 한 번 더 돌린다.
 
 ---
+
+## 버전
+
+현재 버전은 저장소 루트의 `VERSION` 파일(`1.0`)이고, GitHub 에는 같은 이름의 태그(`v1.0`)로 남긴다.
+네 스크립트 모두 시작 배너와 결과 요약에 버전을 찍고, `--version` 으로 바로 확인할 수 있다.
+`run-burnin.sh` 는 `system_info.txt` 에도 기록한다.
+
+git clone 한 폴더에서는 `git describe` 결과가 붙어 서버의 클론이 최신인지 바로 보인다.
+
+| 표시 | 뜻 |
+|---|---|
+| `v1.0` | 태그 v1.0 그대로 |
+| `v1.0-3-g81d8702` | v1.0 이후 커밋이 3개 더 있는 상태 (태그 전 개발분) |
+| `v1.0-dirty` | 서버에서 파일을 손댄 상태 — `git status` 로 확인 |
+| `v1.1 (v1.0-2-gxxxxxxx)` | `VERSION` 은 올렸는데 아직 태그를 안 단 상태 |
+
+scp 로 복사해 `.git` 이 없으면 `VERSION` 값만 나온다.
+
+**릴리스 절차** — 브랜치는 `main` 하나로 쓰고, 배포할 때 태그만 단다.
+
+```bash
+echo 1.1 > VERSION
+git commit -am "v1.1: <바뀐 내용>"
+git tag -a v1.1 -m "<바뀐 내용>"
+git push origin main --tags
+```
 
 ## 환경변수
 

@@ -37,6 +37,7 @@
 set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$SCRIPT_DIR/lib/version.sh"
 DUR=300
 DO_BURN=0
 DO_HW=1
@@ -59,6 +60,7 @@ while [[ $# -gt 0 ]]; do
         --burn-dir) shift; BURN_DIR=${1:?--burn-dir 뒤에 경로를 주세요} ;;
         --no-build) DO_BUILD=0 ;;
         -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
     esac
     shift
@@ -81,6 +83,7 @@ bad()  { printf '   %s%s%s\n' "$C_R" "$*" "$C_RST"; }
 
 hr
 printf ' %sDEEPGadget 기능 테스트%s  —  %s\n' "$C_C" "$C_RST" "$HOSTN"
+printf '   버전       : prodtech_inspection %s\n' "$PI_VERSION"
 printf '   HW 정보    : %s\n' "$([ "$DO_HW" -eq 1 ] && echo '수집' || echo '생략 (--no-hw)')"
 printf '   번인       : %s\n' "$([ "$DO_BURN" -eq 1 ] && echo "GPU ${DUR}초 (CPU stress 없음)" || echo '생략 (--burn 으로 켬)')"
 printf '   메모리 부하: %s\n' "$([ "$MEM_LOAD" -eq 1 ] && echo "$MEM_SIZE" || echo '없음 (--mem 으로 켬)')"
@@ -410,7 +413,7 @@ BURN_DIR=$(ls -dt "$OUT"/burnin_* 2>/dev/null | head -1)
 CSV=$(ls -t "$BURN_DIR"/GPU_CPU_*.csv 2>/dev/null | head -1)
 
 printf '\n'; hr
-printf ' %s기능 테스트 완료%s  —  %s\n' "$C_C" "$C_RST" "$HOSTN"
+printf ' %s기능 테스트 완료%s  —  %s  ·  prodtech_inspection %s\n' "$C_C" "$C_RST" "$HOSTN" "$PI_VERSION"
 hr
 if [[ "$DO_HW" -eq 1 ]]; then
     printf '   HW 정보    : %s\n' "$OUT/hw/inspect.log"
