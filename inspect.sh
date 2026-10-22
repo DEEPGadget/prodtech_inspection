@@ -17,6 +17,7 @@
 #   ./inspect.sh --no-load       # 부하 없이 (GPU 는 유휴 Gen1 속도가 그대로 찍힘)
 #   ./inspect.sh --load-sec 30   # 부하를 건 뒤 수집 시작까지 기다리는 시간(기본 20초)
 #   ./inspect.sh --hw-only       # PART 1(하드웨어)만 하고 끝 — functest.sh 가 쓴다
+#   ./inspect.sh --ext-load      # 부하는 호출한 쪽이 이미 걸어 둠(functest --burn) — 직접 띄우지 않고 부하 상태로 판정
 #
 # 결과는 실행한 디렉터리 아래 inspect_<host>_<시각>/ 에 모인다.
 #   inspect.log   전체 출력
@@ -36,6 +37,7 @@ source "$SCRIPT_DIR/lib/version.sh"
 
 # --check 는 예전 옵션. 이제 항상 읽기 전용이라 받아만 주고 무시한다.
 PCIE_LOAD=1
+PCIE_EXT=0
 HW_ONLY=0
 PCIE_LOAD_SEC=${PCIE_LOAD_SEC:-20}
 while [[ $# -gt 0 ]]; do
@@ -44,7 +46,8 @@ while [[ $# -gt 0 ]]; do
         --no-load) PCIE_LOAD=0 ;;
         --hw-only) HW_ONLY=1 ;;
         --load-sec) shift; PCIE_LOAD_SEC=${1:-20} ;;
-        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+        --ext-load) PCIE_LOAD=1; PCIE_EXT=1 ;;
+        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
         --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
         --skip-version-check) export PI_SKIP_VERSION_CHECK=1 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
@@ -163,6 +166,15 @@ sudo -v || { err "sudo 권한이 필요합니다."; exit 1; }
 # 부하는 PCIe 항목 측정이 끝나는 즉시 내린다(gpu_load_stop). 비정상 종료 시에도 trap 으로 내린다.
 GPULOAD_PID=""; PCIE_LOADED=0
 gpu_load_start() {
+    if [[ "$PCIE_EXT" -eq 1 ]]; then
+        # functest --burn 이 gadget_burn 을 이미 띄워 둔 상태. 두 개를 겹쳐 띄우면 VRAM 이 모자라 OOM 이 난다.
+        PCIE_LOADED=1
+        log "GPU 부하: 호출한 쪽(functest)이 걸어 둔 부하 위에서 측정 (--ext-load)"
+        printf '   GPU util %s%%  power %sW\n' \
+            "$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)" \
+            "$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits 2>/dev/null | head -1)"
+        return 0
+    fi
     [[ "$PCIE_LOAD" -eq 1 ]] || { warn "--no-load: 유휴 상태로 측정합니다 (GPU 링크가 낮게 보일 수 있음)"; return 0; }
     have nvidia-smi || { warn "nvidia-smi 없음 → GPU 부하 없이 진행합니다"; return 0; }
     # 탐색 순서는 lib/find-gadget-burn.sh 참고 (BURN_DIR → 저장소 → 저장소 옆 → ~/gadget-burn → PATH)

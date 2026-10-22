@@ -7,9 +7,11 @@
 #   2) GPU 상태         : ECC 카운터, nvidia-smi topo -m, NVLink 링크 상태/에러를 저장·판정한다
 #                         (번인이 끝난 뒤 ECC 를 다시 읽어 늘어난 게 있는지 비교)
 #   3) HW 정보          : inspect.sh 의 하드웨어 점검(PART 1)만 돌린다
-#                         PCIe 측정용 GPU 부하는 걸지 않는다(--no-load) — 보조전원을 다 꽂지 않고
-#                         부팅한 경우가 있어서, 확인 전 단계에서 전 GPU 에 부하를 거는 건 위험하다.
-#                         그래서 PCIe 는 폭만 판정하고 속도(Gen)는 판정하지 않는다.
+#      ※ --burn 이면 2)·3) 을 GPU 부하(gadget_burn)를 먼저 걸고 20초 뒤에 찍는다 — 유휴 GPU 는
+#        링크를 Gen1(2.5GT/s)로 내리므로, 부하 중이어야 낼 수 있는 최대 속도(Gen4/5)가 찍힌다.
+#        이 부하는 3) 이 끝나면 내리고 4) 번인이 새로 시작한다. PCIe 속도(Gen)까지 판정한다.
+#      ※ --burn 이 없으면 GPU 부하는 전혀 걸지 않는다 — 보조전원을 다 꽂지 않고 부팅한 경우가
+#        있어서, 확인 전 단계에서 전 GPU 에 부하를 거는 건 위험하다. PCIe 는 폭만 판정한다.
 #   4) GPU 번인         : 기본은 돌지 않는다. --burn 을 주면 5분 (검수용 1시간 번인과 구분).
 #                         보조전원을 다 꽂지 않고 부팅한 경우가 있어서, 부하는 명시했을 때만 건다.
 #                         CPU stress 는 걸지 않는다(run-burnin.sh --no-cpu). CPU 온도는 그대로 기록된다.
@@ -44,6 +46,7 @@ DO_HW=1
 MEM_LOAD=0
 MEM_SIZE="80%"
 INTERVAL=5
+PRELOAD_SEC=20      # --burn 일 때 2)·3) 측정 전에 부하를 걸고 기다리는 시간
 DO_BUILD=1
 GB_URL=${GB_URL:-https://github.com/DEEPGadget/gadget-burn.git}
 
@@ -59,7 +62,7 @@ while [[ $# -gt 0 ]]; do
         --interval) shift; INTERVAL=${1:-5} ;;
         --burn-dir) shift; BURN_DIR=${1:?--burn-dir 뒤에 경로를 주세요} ;;
         --no-build) DO_BUILD=0 ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
         --version) echo "prodtech_inspection $PI_VERSION"; exit 0 ;;
         --skip-version-check) export PI_SKIP_VERSION_CHECK=1 ;;
         *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
@@ -186,6 +189,40 @@ else
     printf '\n%s[1/4] gadget-burn 준비%s  — 생략 (번인 안 함)\n' "$C_B" "$C_RST"
 fi
 
+# ---------------------------------------------------------------- 측정용 GPU 부하 (--burn 일 때만)
+# 유휴 GPU 는 링크를 Gen1(2.5GT/s)로 내린다. 2)·3) 에서 찍는 PCIe 속도가 최대치로 나오도록
+# gadget_burn 을 먼저 띄우고 기다린 뒤 측정한다. 3) 이 끝나면 PID 로 내린다
+# (4) 번인이 gadget_burn 을 새로 띄우므로 겹치면 VRAM OOM). --burn 이 없으면 아예 걸지 않는다.
+PRELOAD_PID=""; PRELOADED=0
+preload_stop() {
+    # 주의: pkill -f gadget_burn 은 다른 사람이 돌리는 번인까지 죽인다. PID 로만 끝낼 것.
+    [[ -n "$PRELOAD_PID" ]] || return 0
+    kill "$PRELOAD_PID" 2>/dev/null
+    wait "$PRELOAD_PID" 2>/dev/null
+    PRELOAD_PID=""
+}
+if [[ "$DO_BURN" -eq 1 ]]; then
+    trap 'preload_stop' EXIT INT TERM
+    printf '\n%sGPU 부하 인가%s  — 측정 전 %s초 대기 (PCIe 링크를 최대 속도로 올리기 위함)\n' "$C_B" "$C_RST" "$PRELOAD_SEC"
+    # 지속시간은 넉넉히 주고 측정이 끝나면 PID 로 끝낸다
+    "$GB" -t 900 > "$OUT/pcie-load-burn.log" 2>&1 &
+    PRELOAD_PID=$!
+    for ((t = 0; t < PRELOAD_SEC; t++)); do
+        kill -0 "$PRELOAD_PID" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$PRELOAD_PID" 2>/dev/null; then
+        PRELOADED=1
+        printf '   GPU util %s%%  power %sW  → 부하 인가됨\n' \
+            "$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)" \
+            "$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits 2>/dev/null | head -1)"
+    else
+        wait "$PRELOAD_PID" 2>/dev/null; PRELOAD_PID=""
+        bad "gadget_burn 이 ${t}초 만에 끝났습니다 → 부하 없이(유휴 2.5GT/s) 측정합니다. 로그: $OUT/pcie-load-burn.log"
+        grep -m1 -iE 'error|fail|out of memory' "$OUT/pcie-load-burn.log" | cut -c1-110 | sed 's/^/     /'
+    fi
+fi
+
 # ---------------------------------------------------------------- 2) GPU 상태 (ECC / topo / NVLink)
 # 번인 전에 ECC 카운터·PCIe/NVLink 토폴로지·NVLink 링크 상태를 저장하고, 번인이 끝난 뒤
 # ECC 를 한 번 더 읽어 늘어난 게 있는지 본다. 설정은 바꾸지 않는다.
@@ -254,12 +291,18 @@ else
             printf '   %-3s %-26.26s %-14s %-40s %-16s %-16s %4s℃ %3s/%-3s %3s/%-3s %s' \
                 "$idx" "$name" "$serial" "$uuid" "$bus" "$vbios" "$temp" "$gcur" "$gmax" "$wcur" "$wmax" "$ua"
             # gen 은 idle 이면 내려가지만 폭(width)은 내려가지 않는다 → current < max 면 슬롯/라이저 문제
+            # gen 은 부하 중(--burn)에 찍었을 때만 판정한다
             why=""
             gt0 "$ua" && why="uncorrected(aggregate) $ua"
             [[ "$wcur" =~ ^[0-9]+$ && "$wmax" =~ ^[0-9]+$ && "$wcur" -lt "$wmax" ]] && why="${why:+$why, }PCIe 폭 x$wcur (카드는 x$wmax)"
+            [[ "$PRELOADED" -eq 1 && "$gcur" =~ ^[0-9]+$ && "$gmax" =~ ^[0-9]+$ && "$gcur" -lt "$gmax" ]] && why="${why:+$why, }부하 중 PCIe Gen$gcur (카드는 Gen$gmax)"
             if [[ -n "$why" ]]; then printf '  %s← %s%s\n' "$C_R" "$why" "$C_RST"; GPU_RC=1; else printf '\n'; fi
         done < "$GPUDIR/gpu_list.csv"
-        printf '   ※ PCIe gen current 는 idle 이면 낮게 나온다(판정 안 함). 폭(Width)은 idle 에도 유지되므로 max 보다 작으면 확인 필요.\n'
+        if [[ "$PRELOADED" -eq 1 ]]; then
+            printf '   ※ GPU 부하 중 측정 — PCIe gen/폭 모두 max 보다 작으면 확인 필요.\n'
+        else
+            printf '   ※ PCIe gen current 는 idle 이면 낮게 나온다(판정 안 함). 폭(Width)은 idle 에도 유지되므로 max 보다 작으면 확인 필요.\n'
+        fi
     else
         note "GPU 목록 조회 실패 (nvidia-smi --query-gpu)"
     fi
@@ -332,12 +375,15 @@ fi
 if [[ "$DO_HW" -eq 1 ]]; then
     printf '\n%s[3/4] HW 정보 수집%s\n' "$C_B" "$C_RST"
     [[ -x "$SCRIPT_DIR/inspect.sh" ]] || { echo "inspect.sh 를 찾을 수 없습니다: $SCRIPT_DIR" >&2; exit 1; }
-    OUTDIR="$OUT/hw" "$SCRIPT_DIR/inspect.sh" --hw-only --no-load
+    # --burn 이면 위에서 건 부하 위에서 측정(--ext-load: inspect 가 gadget_burn 을 또 띄우지 않음)
+    if [[ "$PRELOADED" -eq 1 ]]; then LOAD_OPT=--ext-load; else LOAD_OPT=--no-load; fi
+    OUTDIR="$OUT/hw" "$SCRIPT_DIR/inspect.sh" --hw-only "$LOAD_OPT"
     HW_RC=$?
     printf '   → %s\n' "$OUT/hw"
 else
     HW_RC=0
 fi
+preload_stop
 
 # ---------------------------------------------------------------- 4) 번인
 BURN_RC=0
@@ -374,7 +420,7 @@ else
         wait "$MEM_PID" 2>/dev/null
         MEM_PID=""
     }
-    trap 'cleanup_mem' EXIT INT TERM
+    trap 'cleanup_mem; preload_stop' EXIT INT TERM
 
     [[ -x "$SCRIPT_DIR/run-burnin.sh" ]] || { echo "run-burnin.sh 를 찾을 수 없습니다: $SCRIPT_DIR" >&2; cleanup_mem; exit 1; }
     # NOTE: run-burnin.sh 는 exec sudo 로 자기를 재실행한다. BURN_DIR/OUT_ROOT 같은 자기 설정값은

@@ -205,6 +205,9 @@ GPU 의 ECC/NVLink 가 깨끗한지, GPU 가 부하를 받는지만 짧게 본�
 **기본은 GPU 에 부하를 전혀 걸지 않는다.** 보조전원 플러그를 다 꽂지 않은 채 부팅하는
 경우가 있어서, 번인(4단계)과 그 준비(1단계: clone/빌드)는 `--burn` 을 줬을 때만 돈다.
 HW 단계도 `inspect.sh --no-load` 로 불러 PCIe 측정용 부하를 걸지 않는다(폭만 판정, 속도는 SKIP).
+`--burn` 을 주면 1단계가 끝난 뒤 **`gadget_burn` 을 먼저 띄우고 20초 기다린 다음 2·3단계를 찍는다.**
+유휴 GPU 는 링크가 2.5GT/s 로 내려가 있어서, 부하 중에 찍어야 최대 속도(Gen4 16GT/s / Gen5 32GT/s)가
+나온다. 이 부하는 3단계가 끝나면 내리고, 4단계 번인이 새로 시작한다(겹치면 VRAM OOM).
 `--time` / `--mem` 은 번인 옵션이라 `--burn` 없이 주면 멈춘다.
 
 **1단계: gadget-burn 준비.** 소스 디렉터리를 `--burn-dir` → `<저장소>/gadget-burn` →
@@ -233,7 +236,8 @@ CUDA 쪽 문제는 **안내만 하고 고치지 않는다**(설치·변경 없�
    - **GPU 목록**: `nvidia-smi --query-gpu` 한 번으로 GPU 별 이름·S/N·UUID·BDF·VBIOS·온도·
      PCIe gen/폭(current/max)·ECC uncorrected aggregate 를 한 줄씩 (`gpu/gpu_list.csv`).
      PCIe gen current 는 idle 이면 낮게 나오므로 판정하지 않지만, 폭(width)은 idle 에도 유지되므로
-     **current < max 면 확인 필요**(슬롯/라이저 의심). 부하 중 속도 판정은 `./inspect.sh` 가 한다.
+     **current < max 면 확인 필요**(슬롯/라이저 의심). `--burn` 이면 부하 중에 찍으므로 gen 도
+     **current < max 면 확인 필요**로 판정한다.
    - **ECC**: GPU 별 ECC 모드, corrected/uncorrected (volatile·aggregate), row remapping
      (Ampere 이후; 없으면 retired pages). **uncorrected > 0 이거나 remap uncorrectable /
      pending / failure > 0 이면 확인 필요**. ECC 미지원·Disabled(`[N/A]`) 카드는 표시만 한다.
@@ -246,6 +250,8 @@ CUDA 쪽 문제는 **안내만 하고 고치지 않는다**(설치·변경 없�
      수가 다르거나, 에러 카운터가 0 이 아니면 확인 필요** (브리지 장착/접촉 의심).
 3. **HW 정보** — `inspect.sh --hw-only --no-load` 를 쓴다(PART 1만, 서버 설정은 안 봄).
    GPU 부하를 걸지 않으므로 PCIe 는 폭만 판정하고 속도는 SKIP 으로 남긴다.
+   `--burn` 이면 `inspect.sh --hw-only --ext-load` 로, functest 가 걸어 둔 부하 위에서 찍고
+   PCIe 속도까지 판정한다(`raw/lspci-vvv.txt` 도 최대 속도로 남는다).
    끝에 **하드웨어 구성 요약**(CPU 모델/수량/S/N, 메인보드 모델/S/N, RAM 제조사·단품
    용량·속도·수량·총 용량, 스토리지·PCIe 디바이스의 구분/모델/S/N)을 `hw/hw_summary.txt`
    로 남기고, functest 가 끝날 때 다시 출력한다
@@ -258,6 +264,7 @@ GPU 상태 판정에 걸린 항목이 있으면 요약의 `GPU 판정` 에 표�
 ```
 functest_<host>_<시각>/
 ├── gadget-burn-build.log  make clean && make 출력 (clone 했으면 gadget-burn-clone.log 도) — --burn 인 경우
+├── pcie-load-burn.log     2·3단계 측정용 부하(gadget_burn) 출력 — --burn 인 경우
 ├── gpu/                   gpu_list.csv / ecc_before.csv / ecc_after.csv(--burn) / topo.txt / nvlink_status.txt / nvlink_errors.txt
 ├── hw/                    inspect.log / serials.csv / hw_summary.txt / raw/
 ├── burnin_<host>_<시각>/  온도 CSV, gadget_burn 로그 등 — --burn 인 경우
@@ -278,6 +285,7 @@ functest_<host>_<시각>/
 ./inspect.sh --no-load       # 부하 없이
 ./inspect.sh --load-sec 30   # 부하를 건 뒤 수집 시작까지 기다리는 시간 (기본 20초)
 ./inspect.sh --hw-only       # PART 1(하드웨어)만 — functest.sh 가 쓰는 모드
+./inspect.sh --ext-load      # 부하는 호출한 쪽이 이미 걸어 둠 — 직접 안 띄우고 부하 상태로 판정 (functest --burn)
 ```
 
 아무것도 바꾸지 않는다. 하드웨어를 조사하고, `setup.sh` 가 적용해 둔 설정이
@@ -312,8 +320,8 @@ NVIDIA GPU 는 유휴일 때 링크를 Gen1 으로 내린다. 그 상태로 읽�
 **전에** `gadget_burn` 을 백그라운드로 띄우고 20초(`--load-sec`) 기다린다. 그 상태로
 `lspci -vvv` 덤프와 PCIe 항목을 읽고, PCIe 항목이 끝나면 바로 부하를 내린다.
 부하를 걸었을 때만 속도까지 합격 판정하고, 못 걸었으면 "속도 판정 불가" 로 남긴다.
-`--no-load` 로 일부러 안 걸면(`functest.sh` 의 HW 단계가 이렇게 부른다) 폭만 판정하고
-속도는 SKIP 으로 남긴다.
+`--no-load` 로 일부러 안 걸면(`functest.sh` 를 `--burn` 없이 돌리면 이렇게 부른다) 폭만 판정하고
+속도는 SKIP 으로 남긴다. `functest.sh --burn` 은 자기가 띄운 부하 위에서 `--ext-load` 로 부른다.
 
 ### 구성품 S/N
 
@@ -609,7 +617,7 @@ GRUB 안내는 exit code 에 반영되지 않는다. `setup.sh` 요약 뒤에 �
 | functest 가 `[안내] CUDA 툴킷(nvcc)이 없어…` | 빌드 못 함. 드라이버가 지원하는 CUDA 버전 이하의 툴킷을 설치한 뒤 재실행. 빌드본이 있으면 `--no-build` 로 그대로 진행 가능 |
 | 번인 시작 직후 `gadget_burn.log` 가 `invalid option -- 'o'` | 2026-09 이전 gadget-burn(release 1.0). 스크립트가 `-h` 로 미리 판별해 `-o` 없이 돌리므로 번인은 되지만 TFLOPS/Peak 는 안 나온다. `git -C <gadget-burn> pull --ff-only && make -C <gadget-burn>` 으로 갱신 |
 | `Could not get lock /var/lib/dpkg/lock` | 자동 업데이트 타이머가 먼저 깨어난 것. `./setup.sh` 를 다시 돌리면 맨 앞에서 차단하고 진행한다 |
-| GPU 가 `Speed 2.5GT/s (downgraded)` | 유휴 상태로 읽힌 것. `inspect.sh` 는 `--no-load` 를 뺐는지 확인 (기본은 부하를 건다). `functest.sh` 는 원래 부하 없이 재므로 속도는 SKIP |
+| GPU 가 `Speed 2.5GT/s (downgraded)` | 유휴 상태로 읽힌 것. `inspect.sh` 는 `--no-load` 를 뺐는지 확인 (기본은 부하를 건다). `functest.sh` 는 `--burn` 없이 돌리면 부하 없이 재므로 속도는 SKIP — 속도까지 보려면 `--burn` |
 | 온보드 NIC 이 `Width x4` 로 ❌ | 설계상 x4 인 보드가 많다(예: MS73-HB2 의 BCM57416). 슬롯 카드가 아니면 상위 브리지의 `LnkSta` 를 보고 판단한다 |
 | GRUB 항목만 계속 ❌ | `setup.sh` 는 grub 을 자동 편집하지 않는다. 안내대로 편집 → `sudo update-grub` → **재부팅** |
 | `ipmitool` 없음 → PSU ⚠️ | `./setup.sh` 로 설치. 건너뜀이라 검수는 계속된다 |
